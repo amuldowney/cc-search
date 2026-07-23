@@ -51,6 +51,8 @@ search options:
   --session ID          restrict to one session
   --type TYPE           restrict to user, assistant, system, ...
   --any                 match any term (default: every term must appear)
+  --raw                 treat the pattern as an FTS5 boolean expression
+                        (OR, NOT, NEAR, parens, "quoted phrases")
   --prefer-recaps       sort recap messages first
   --recaps-only         return only recap messages
 
@@ -241,6 +243,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	preferRecaps := f.set.Bool("prefer-recaps", false, "sort recap messages first")
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 	any := f.set.Bool("any", false, "match any term rather than all of them")
+	raw := f.set.Bool("raw", false, "pass the pattern to FTS5 as a boolean expression")
 
 	if len(args) == 0 {
 		return fmt.Errorf("%w: search needs a pattern", errUsage)
@@ -256,6 +259,10 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if f.set.NArg() > 0 {
 		return fmt.Errorf("%w: unexpected argument %q — quote multi-word patterns",
 			errUsage, f.set.Arg(0))
+	}
+
+	if *raw && *any {
+		return fmt.Errorf("%w: --any has no meaning for a --raw query; write OR yourself", errUsage)
 	}
 
 	cfg = f.resolve(cfg)
@@ -283,9 +290,14 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		ProseOnly:      !f.all,
 		RecapsOnly:     *recapsOnly,
 		Any:            *any,
+		Raw:            *raw,
 	}
 	msgs, err := db.Search(search)
 	if err != nil {
+		if errors.Is(err, index.ErrBadQuery) {
+			return fmt.Errorf("%w: %w\n  quote punctuation in a raw query, "+
+				`e.g. "display.cpp" NOT proxy`, errUsage, err)
+		}
 		return err
 	}
 
@@ -293,7 +305,8 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	// rather than genuinely absent, so fall back to matching any term and say
 	// so rather than reporting the topic was never discussed.
 	relaxed := false
-	if len(msgs) == 0 && !*any && index.TermCount(pattern) > 1 {
+	// A raw query says exactly what was meant, so it is never rewritten.
+	if len(msgs) == 0 && !*any && !*raw && index.TermCount(pattern) > 1 {
 		search.Any = true
 		if msgs, err = db.Search(search); err != nil {
 			return err

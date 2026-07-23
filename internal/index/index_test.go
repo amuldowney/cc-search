@@ -791,3 +791,72 @@ func TestSearchStemmingSplitsMentNominalizations(t *testing.T) {
 			"the noun, the stemmer improved and this test can go", contents(got))
 	}
 }
+
+func TestSearchRawAcceptsBooleanOperators(t *testing.T) {
+	db, _ := newIndex(t, []msg{
+		{"user", "alpha and beta together", 30},
+		{"user", "gamma on its own", 20},
+		{"user", "beta without the others", 10},
+	})
+
+	got, err := db.Search(SearchOptions{Query: "alpha OR gamma", Raw: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("OR matched %d, want 2", len(got))
+	}
+
+	got, err = db.Search(SearchOptions{Query: "beta NOT alpha", Raw: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "beta without the others" {
+		t.Errorf("NOT matched %v, want only the message without alpha", contents(got))
+	}
+}
+
+func TestSearchRawReportsSyntaxErrors(t *testing.T) {
+	db, _ := newIndex(t, []msg{{"user", "edit display.cpp today", 10}})
+
+	_, err := db.Search(SearchOptions{Query: "display.cpp", Raw: true})
+
+	if !errors.Is(err, ErrBadQuery) {
+		t.Fatalf("err = %v, want ErrBadQuery", err)
+	}
+	// Quoting is the documented fix, so it must actually work.
+	got, qerr := db.Search(SearchOptions{Query: `"display.cpp"`, Raw: true})
+	if qerr != nil {
+		t.Fatalf("quoted raw query failed: %v", qerr)
+	}
+	if len(got) != 1 {
+		t.Errorf("quoted raw query matched %d, want 1", len(got))
+	}
+}
+
+func TestSearchRawStillHonoursProseOnly(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	writeRawTranscript(t, dir, "session-a", []string{
+		fmt.Sprintf(`{"type":"assistant","uuid":"w1","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"alpha.json"}}]}}`, ts),
+		fmt.Sprintf(`{"type":"assistant","uuid":"w2","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"text","text":"alpha was discussed"}]}}`, ts),
+	})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Search(SearchOptions{Query: "alpha OR beta", Raw: true, ProseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "w2" {
+		t.Errorf("got %v, want the tool-argument match still excluded", contents(got))
+	}
+}

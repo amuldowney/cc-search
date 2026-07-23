@@ -35,6 +35,7 @@ cc-search search "display.cpp" --limit 5 --window-hours 48
 cc-search search "firmware rollout" --prefer-recaps
 cc-search search "no such module: fts5" --all   # include tool calls + output
 cc-search search "battery dispatch reserve" --any  # any term, not all
+cc-search search '("caddy" OR "pihole") NOT "proxy"' --raw   # boolean logic
 cc-search search "caddy proxy" --recaps-only --full
 
 # read a hit in context (id, or any unique prefix, from a search result)
@@ -51,6 +52,11 @@ ANDed. When a multi-word query matches nothing, the search retries
 with any term rather than reporting the topic was never discussed, and says so
 with `"relaxed": true` plus a note on stderr — those hits are related, not
 exact. `--any` asks for that behaviour up front.
+
+`--raw` hands the pattern to FTS5 verbatim, so `OR`, `NOT`, `NEAR`, parentheses
+and `"quoted phrases"` all work. Punctuation must then be quoted yourself —
+bare `display.cpp` is a syntax error in that mode, `"display.cpp"` is fine. A
+raw query is never relaxed, since it says exactly what was meant.
 
 `read` takes a message id from a search result — any unique prefix works — and
 returns it with its neighbours from the same session, oldest first. That is how

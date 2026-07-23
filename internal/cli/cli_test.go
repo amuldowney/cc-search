@@ -698,3 +698,57 @@ func TestRelaxedWarningCountsWhatWasReturned(t *testing.T) {
 		t.Errorf("stderr = %q, want it to report 1 result", stderr)
 	}
 }
+
+func TestRawFlagSupportsBooleanOperators(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, stderr, code := run(t, cfg, "search", "alpha OR gamma", "--raw")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 2 {
+		t.Errorf("Total = %d, want 2", resp.Total)
+	}
+}
+
+func TestRawSyntaxErrorIsAUsageError(t *testing.T) {
+	cfg := termFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "display.cpp", "--raw"}, cfg, &stdout, &stderr)
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 for a bad query", code)
+	}
+	if !strings.Contains(stderr.String(), "quot") {
+		t.Errorf("stderr = %q, want it to suggest quoting punctuation", stderr.String())
+	}
+}
+
+func TestRawQueriesAreNeverRelaxed(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, stderr, code := run(t, cfg, "search", "alpha AND gamma", "--raw")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 0 {
+		t.Fatalf("Total = %d, want 0", resp.Total)
+	}
+	if resp.Relaxed {
+		t.Error("Relaxed = true; an explicit boolean query must not be rewritten")
+	}
+}
+
+func TestRawAndAnyTogetherIsRejected(t *testing.T) {
+	cfg := termFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "alpha gamma", "--raw", "--any"}, cfg, &stdout, &stderr)
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 — --any has no meaning for a raw query", code)
+	}
+}

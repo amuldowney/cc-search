@@ -107,7 +107,10 @@ type SearchOptions struct {
 	PreferRecaps   bool
 	ProseOnly      bool
 	// Any matches messages containing any term rather than all of them.
-	Any        bool
+	Any bool
+	// Raw passes Query to FTS5 untouched, so it may use OR, NOT, NEAR,
+	// grouping and phrases. Punctuation must then be quoted by the caller.
+	Raw        bool
 	RecapsOnly bool
 }
 
@@ -336,6 +339,9 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 // Search returns messages matching opts.Query, most relevant first.
 func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 	match := ftsQuery(opts.Query, opts.Any)
+	if opts.Raw {
+		match = strings.TrimSpace(opts.Query)
+	}
 	if match == "" {
 		return nil, nil
 	}
@@ -388,7 +394,12 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 		args = append(args, opts.Limit)
 	}
 
-	return d.collect(query, args...)
+	msgs, err := d.collect(query, args...)
+	if err != nil && opts.Raw {
+		// The caller wrote this expression, so a failure here is theirs.
+		return nil, fmt.Errorf("%w: %w", ErrBadQuery, err)
+	}
+	return msgs, err
 }
 
 func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
@@ -447,6 +458,9 @@ var (
 	ErrNoSuchID    = errors.New("no message with that id")
 	ErrAmbiguousID = errors.New("ambiguous id prefix")
 )
+
+// ErrBadQuery reports that a raw query is not valid FTS5 syntax.
+var ErrBadQuery = errors.New("invalid query")
 
 // Around returns the message addressed by id together with its neighbours in
 // the same session, oldest first. id may be a unique prefix. When proseOnly is
