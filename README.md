@@ -36,10 +36,24 @@ cc-search search "firmware rollout" --prefer-recaps
 cc-search search "no such module: fts5" --all   # include tool calls + output
 cc-search search "caddy proxy" --recaps-only --full
 
+# read a hit in context (id, or any unique prefix, from a search result)
+cc-search read 36b182bb --before 3 --after 3
+
 # index maintenance (rarely needed — sync is automatic)
 cc-search rebuild
 cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 ```
+
+`read` takes a message id from a search result — any unique prefix works — and
+returns it with its neighbours from the same session, oldest first. That is how
+you recover *why* something was decided rather than just the sentence that
+decided it.
+
+Output is capped at 60,000 characters by default (`--budget N`, `0` disables).
+The cap never bites on ordinary queries; it stops `--full` on a huge tool
+result from flooding a context window. When it does bite, the dropped results
+are reported on stderr and `truncated` is true — one result is always returned,
+clipped if it alone exceeds the budget.
 
 The search pattern is positional and must come before the flags — putting a
 flag there is rejected rather than searched for.

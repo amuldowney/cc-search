@@ -2,12 +2,16 @@ package index
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
 
 // writeTranscript writes a JSONL transcript file for sessionID whose lines are
@@ -542,5 +546,163 @@ func TestSearchQuotesQueryWithFTSSyntax(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d results, want 1", len(got))
+	}
+}
+
+func readFixture(t *testing.T) *DB {
+	t.Helper()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	var lines []string
+	for i, text := range []string{"one", "two", "three", "four", "five"} {
+		ts := base.Add(time.Duration(i) * time.Minute).UTC().Format(time.RFC3339Nano)
+		lines = append(lines, fmt.Sprintf(
+			`{"type":"user","uuid":"aaaa%d-msg","sessionId":"session-a","timestamp":%q,`+
+				`"message":{"content":%q}}`, i, ts, text))
+	}
+	// A second session must never leak into the neighbours of the first.
+	lines = append(lines, fmt.Sprintf(
+		`{"type":"user","uuid":"bbbb0-msg","sessionId":"session-b","timestamp":%q,`+
+			`"message":{"content":"other session"}}`,
+		base.Add(90*time.Second).UTC().Format(time.RFC3339Nano)))
+	writeRawTranscript(t, dir, "session-a", lines[:5])
+	writeRawTranscript(t, dir, "session-b", lines[5:])
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func contents(msgs []transcript.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		out = append(out, m.Content)
+	}
+	return out
+}
+
+func TestAroundReturnsNeighboursInChronologicalOrder(t *testing.T) {
+	db := readFixture(t)
+
+	got, err := db.Around("aaaa2-msg", 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"two", "three", "four"}
+	if !slices.Equal(contents(got), want) {
+		t.Errorf("got %v, want %v", contents(got), want)
+	}
+}
+
+func TestAroundClampsAtSessionEdges(t *testing.T) {
+	db := readFixture(t)
+
+	got, err := db.Around("aaaa0-msg", 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"one", "two"}
+	if !slices.Equal(contents(got), want) {
+		t.Errorf("got %v, want %v", contents(got), want)
+	}
+}
+
+func TestAroundStaysWithinOneSession(t *testing.T) {
+	db := readFixture(t)
+
+	got, err := db.Around("aaaa2-msg", 5, 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, m := range got {
+		if m.SessionID != "session-a" {
+			t.Errorf("neighbour from %s leaked in: %q", m.SessionID, m.Content)
+		}
+	}
+	if len(got) != 5 {
+		t.Errorf("got %d messages, want all 5 of session-a", len(got))
+	}
+}
+
+func TestAroundResolvesUniquePrefix(t *testing.T) {
+	db := readFixture(t)
+
+	got, err := db.Around("aaaa3", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 1 || got[0].Content != "four" {
+		t.Fatalf("got %v, want just the addressed message", contents(got))
+	}
+}
+
+func TestAroundRejectsAmbiguousPrefix(t *testing.T) {
+	db := readFixture(t)
+
+	_, err := db.Around("aaaa", 0, 0, false)
+
+	if !errors.Is(err, ErrAmbiguousID) {
+		t.Errorf("err = %v, want ErrAmbiguousID", err)
+	}
+}
+
+func TestAroundReportsUnknownID(t *testing.T) {
+	db := readFixture(t)
+
+	_, err := db.Around("nosuchid", 0, 0, false)
+
+	if !errors.Is(err, ErrNoSuchID) {
+		t.Errorf("err = %v, want ErrNoSuchID", err)
+	}
+}
+
+func TestAroundProseOnlySkipsToolNeighboursButKeepsTarget(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	ts := func(i int) string {
+		return base.Add(time.Duration(i) * time.Minute).UTC().Format(time.RFC3339Nano)
+	}
+	writeRawTranscript(t, dir, "session-a", []string{
+		fmt.Sprintf(`{"type":"assistant","uuid":"r0","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"text","text":"spoken before"}]}}`, ts(0)),
+		fmt.Sprintf(`{"type":"assistant","uuid":"r1","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`, ts(1)),
+		fmt.Sprintf(`{"type":"assistant","uuid":"r2","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"text","text":"spoken after"}]}}`, ts(2)),
+	})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Around("r0", 0, 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].ID != "r2" {
+		t.Errorf("got %v, want the tool-only neighbour skipped", contents(got))
+	}
+
+	// The addressed message is always returned, even with no prose of its own.
+	target, err := db.Around("r1", 0, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(target) != 1 || target[0].ID != "r1" {
+		t.Errorf("got %v, want the addressed message itself", contents(target))
 	}
 }

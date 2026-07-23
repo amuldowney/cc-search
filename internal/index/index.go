@@ -5,9 +5,11 @@ package index
 import (
 	"bufio"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -422,4 +424,87 @@ func ftsQuery(pattern string) string {
 		terms = append(terms, `"`+escaped+`"*`)
 	}
 	return strings.Join(terms, " ")
+}
+
+// ErrNoSuchID and ErrAmbiguousID report why a message address did not resolve.
+var (
+	ErrNoSuchID    = errors.New("no message with that id")
+	ErrAmbiguousID = errors.New("ambiguous id prefix")
+)
+
+// Around returns the message addressed by id together with its neighbours in
+// the same session, oldest first. id may be a unique prefix. When proseOnly is
+// set the neighbours are limited to messages that said something, but the
+// addressed message is always included.
+func (d *DB) Around(id string, before, after int, proseOnly bool) ([]transcript.Message, error) {
+	target, rowid, err := d.resolve(id)
+	if err != nil {
+		return nil, err
+	}
+
+	filter := ""
+	if proseOnly {
+		filter = ` AND prose != ''`
+	}
+
+	// Ties on timestamp are broken by rowid, which follows transcript order.
+	earlier, err := d.collect(`SELECT `+selectColumns+` FROM messages
+		WHERE sessionId = ?
+		  AND (timestamp < ? OR (timestamp = ? AND rowid < ?))`+filter+`
+		ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
+		target.SessionID, target.Timestamp, target.Timestamp, rowid, before)
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(earlier)
+
+	later, err := d.collect(`SELECT `+selectColumns+` FROM messages
+		WHERE sessionId = ?
+		  AND (timestamp > ? OR (timestamp = ? AND rowid > ?))`+filter+`
+		ORDER BY timestamp ASC, rowid ASC LIMIT ?`,
+		target.SessionID, target.Timestamp, target.Timestamp, rowid, after)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]transcript.Message, 0, len(earlier)+1+len(later))
+	out = append(out, earlier...)
+	out = append(out, target)
+	return append(out, later...), nil
+}
+
+// resolve turns an exact id or a unique prefix into one message.
+func (d *DB) resolve(id string) (transcript.Message, int64, error) {
+	var rowid int64
+	msgs, err := d.collect(`SELECT `+selectColumns+` FROM messages WHERE id = ?`, id)
+	if err != nil {
+		return transcript.Message{}, 0, err
+	}
+	if len(msgs) == 0 {
+		// Fall back to prefix matching, fetching two rows to spot ambiguity.
+		msgs, err = d.collect(`SELECT `+selectColumns+` FROM messages
+			WHERE id LIKE ? ESCAPE '\' ORDER BY id LIMIT 2`, escapeLike(id)+"%")
+		if err != nil {
+			return transcript.Message{}, 0, err
+		}
+		switch len(msgs) {
+		case 0:
+			return transcript.Message{}, 0, fmt.Errorf("%w: %q", ErrNoSuchID, id)
+		case 1:
+		default:
+			return transcript.Message{}, 0, fmt.Errorf("%w: %q matches at least %q and %q",
+				ErrAmbiguousID, id, msgs[0].ID, msgs[1].ID)
+		}
+	}
+	if err := d.sql.QueryRow(`SELECT rowid FROM messages WHERE id = ?`, msgs[0].ID).
+		Scan(&rowid); err != nil {
+		return transcript.Message{}, 0, err
+	}
+	return msgs[0], rowid, nil
+}
+
+// escapeLike neutralises LIKE wildcards so an id prefix matches literally.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }

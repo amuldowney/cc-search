@@ -169,3 +169,86 @@ func TestFormatPropagatesTruncatedFlag(t *testing.T) {
 		t.Error("Truncated = false, want true")
 	}
 }
+
+func TestFormatBudgetDropsResultsThatDoNotFit(t *testing.T) {
+	msgs := []transcript.Message{
+		{Content: strings.Repeat("a", 40), CharCount: 40},
+		{Content: strings.Repeat("b", 40), CharCount: 40},
+		{Content: strings.Repeat("c", 40), CharCount: 40},
+	}
+
+	got := Format(msgs, Options{Budget: 90})
+
+	if got.Total != 2 {
+		t.Fatalf("Total = %d, want 2 — the third does not fit in 90 chars", got.Total)
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want true")
+	}
+	if !got.BudgetHit {
+		t.Error("BudgetHit = false, want true")
+	}
+}
+
+func TestFormatBudgetClipsAnOversizedFirstResult(t *testing.T) {
+	msgs := []transcript.Message{{Content: strings.Repeat("a", 500), CharCount: 500}}
+
+	got := Format(msgs, Options{Budget: 50, Full: true})
+
+	if got.Total != 1 {
+		t.Fatalf("Total = %d, want 1 — never return nothing because one message is huge", got.Total)
+	}
+	if len([]rune(got.Results[0].Content)) > 50 {
+		t.Errorf("content is %d runes, want it clipped to the 50 char budget",
+			len([]rune(got.Results[0].Content)))
+	}
+	if !got.BudgetHit {
+		t.Error("BudgetHit = false, want true")
+	}
+}
+
+func TestFormatBudgetZeroMeansUnlimited(t *testing.T) {
+	msgs := []transcript.Message{
+		{Content: strings.Repeat("a", 400), CharCount: 400},
+		{Content: strings.Repeat("b", 400), CharCount: 400},
+	}
+
+	got := Format(msgs, Options{Budget: 0, Full: true})
+
+	if got.Total != 2 || got.BudgetHit {
+		t.Errorf("Total = %d, BudgetHit = %v; want everything with no budget",
+			got.Total, got.BudgetHit)
+	}
+}
+
+func TestFormatBudgetCountsFullContentNotPreview(t *testing.T) {
+	msgs := []transcript.Message{
+		{Content: strings.Repeat("a", 300), CharCount: 300},
+		{Content: strings.Repeat("b", 300), CharCount: 300},
+	}
+
+	// Previews are ~100 chars so both would fit; full bodies are 300 each.
+	got := Format(msgs, Options{Budget: 400, Full: true})
+
+	if got.Total != 1 {
+		t.Errorf("Total = %d, want 1 — the budget must measure what is emitted", got.Total)
+	}
+}
+
+func TestFormatBudgetCountsCharactersNotBytes(t *testing.T) {
+	// 100 three-byte runes: 100 characters, 300 bytes.
+	body := strings.Repeat("字", 100)
+	msgs := []transcript.Message{
+		{Content: body, CharCount: len(body)},
+		{Content: body, CharCount: len(body)},
+	}
+
+	got := Format(msgs, Options{Budget: 250, Full: true})
+
+	if got.Total != 2 {
+		t.Fatalf("Total = %d, want 2 — 200 characters fits a 250 character budget", got.Total)
+	}
+	if got.BudgetHit {
+		t.Error("BudgetHit = true; the budget was counted in bytes, not characters")
+	}
+}

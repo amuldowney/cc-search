@@ -470,3 +470,142 @@ func TestMissingTranscriptDirIsNotFatal(t *testing.T) {
 		t.Error("expected a warning on stderr about the missing transcript dir")
 	}
 }
+
+// conversation writes a numbered exchange in one session.
+func conversation(t *testing.T, n int) Config {
+	t.Helper()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	var body string
+	for i := 0; i < n; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute).UTC().Format(time.RFC3339Nano)
+		body += fmt.Sprintf(
+			`{"type":"user","uuid":"id%02d","sessionId":"session-a","timestamp":%q,`+
+				`"message":{"content":"message %d"}}`+"\n", i, ts, i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+}
+
+func TestReadReturnsMessageWithSurroundingContext(t *testing.T) {
+	cfg := conversation(t, 10)
+
+	resp, stderr, code := run(t, cfg, "read", "id05", "--before", "2", "--after", "2")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 5 {
+		t.Fatalf("Total = %d, want 5", resp.Total)
+	}
+	if resp.Results[0].Preview != "message 3" {
+		t.Errorf("first = %q, want message 3 — read is chronological", resp.Results[0].Preview)
+	}
+	if resp.Results[4].Preview != "message 7" {
+		t.Errorf("last = %q, want message 7", resp.Results[4].Preview)
+	}
+}
+
+func TestReadDefaultsToSurroundingFive(t *testing.T) {
+	cfg := conversation(t, 30)
+
+	resp, _, code := run(t, cfg, "read", "id15")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if resp.Total != 11 {
+		t.Errorf("Total = %d, want 11 (5 before + target + 5 after)", resp.Total)
+	}
+}
+
+func TestReadAcceptsIDPrefix(t *testing.T) {
+	cfg := conversation(t, 3)
+
+	resp, stderr, code := run(t, cfg, "read", "id0", "--before", "0", "--after", "0")
+
+	if code == 0 {
+		t.Fatalf("exit code = 0 for an ambiguous prefix: %+v", resp.Results)
+	}
+	if !strings.Contains(stderr, "ambiguous") {
+		t.Errorf("stderr = %q, want it to say the prefix is ambiguous", stderr)
+	}
+}
+
+func TestReadRejectsUnknownID(t *testing.T) {
+	cfg := conversation(t, 3)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"read", "deadbeef"}, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Error("exit code = 0, want non-zero for an unknown id")
+	}
+}
+
+func TestReadRequiresAnID(t *testing.T) {
+	cfg := conversation(t, 3)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"read"}, cfg, &stdout, &stderr)
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+}
+
+func TestBudgetFlagLimitsOutputAndWarns(t *testing.T) {
+	var msgs []msg
+	for i := 0; i < 10; i++ {
+		msgs = append(msgs, msg{"user", strings.Repeat("x", 200), 60 - i})
+	}
+	cfg := fixture(t, msgs)
+
+	resp, stderr, code := run(t, cfg, "last", "10", "--full", "--budget", "500")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total >= 10 {
+		t.Errorf("Total = %d, want fewer than 10 under a 500 char budget", resp.Total)
+	}
+	if !resp.Truncated {
+		t.Error("Truncated = false, want true")
+	}
+	if !strings.Contains(stderr, "budget") {
+		t.Errorf("stderr = %q, want a warning that the budget bit", stderr)
+	}
+}
+
+func TestDefaultBudgetProtectsAgainstHugeFullOutput(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", strings.Repeat("y", 300000), 10}})
+
+	resp, stderr, code := run(t, cfg, "last", "1", "--full")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if len(resp.Results[0].Content) > DefaultBudget {
+		t.Errorf("content is %d chars with no --budget; want the default cap of %d",
+			len(resp.Results[0].Content), DefaultBudget)
+	}
+	if !strings.Contains(stderr, "budget") {
+		t.Errorf("stderr = %q, want a warning", stderr)
+	}
+}
+
+func TestBudgetZeroDisablesTheCap(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", strings.Repeat("z", 120000), 10}})
+
+	resp, _, code := run(t, cfg, "last", "1", "--full", "--budget", "0")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if len(resp.Results[0].Content) != 120000 {
+		t.Errorf("content is %d chars, want the full 120000 with --budget 0",
+			len(resp.Results[0].Content))
+	}
+}

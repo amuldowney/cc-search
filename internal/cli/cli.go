@@ -27,12 +27,21 @@ const DefaultIndexPath = ".claude/search-index.db"
 // defaultLastCount is how many messages `last` returns without an argument.
 const defaultLastCount = 10
 
+// defaultReadContext is how many messages `read` shows on each side.
+const defaultReadContext = 5
+
+// DefaultBudget caps output characters when no --budget is given. It is large
+// enough that ordinary queries never reach it, and small enough that --full on
+// a huge tool result cannot flood a context window.
+const DefaultBudget = 60000
+
 const usage = `usage: cc-search <command> [options]
 
 commands:
   last [N] [--hours H] [--session ID] [--type TYPE]
                                         most recent messages (default N=10)
   search PATTERN [options]              full-text search across transcripts
+  read ID [--before N] [--after N]      one message plus its neighbours
   rebuild [--session ID]                discard and rebuild the index
 
 search options:
@@ -44,11 +53,17 @@ search options:
   --prefer-recaps       sort recap messages first
   --recaps-only         return only recap messages
 
-output options (last and search):
+read options:
+  --before N            messages of context before it (default 5)
+  --after N             messages of context after it (default 5)
+  ID may be any unique prefix of a message id, as returned by search.
+
+output options (last, search and read):
   --all                 include tool calls and their output (default: only
                         what was actually said)
   --preview-length N    preview size in characters (default 100)
   --full                include the complete message content
+  --budget N            cap total output characters (default 60000, 0 = off)
   --index PATH          index database to use
   --transcripts DIR     transcript directory to index
 `
@@ -88,6 +103,8 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 		err = runLast(rest, cfg, stdout, stderr)
 	case "search":
 		err = runSearch(rest, cfg, stdout, stderr)
+	case "read":
+		err = runRead(rest, cfg, stdout, stderr)
 	case "rebuild":
 		err = runRebuild(rest, cfg, stdout, stderr)
 	case "help", "-h", "--help":
@@ -118,6 +135,7 @@ type commonFlags struct {
 	previewLength int
 	full          bool
 	all           bool
+	budget        int
 	indexPath     string
 	transcriptDir string
 }
@@ -132,6 +150,7 @@ func newFlagSet(name string, stderr io.Writer) *commonFlags {
 	set.StringVar(&f.indexPath, "index", "", "index database to use")
 	set.StringVar(&f.transcriptDir, "transcripts", "", "transcript directory to index")
 	set.BoolVar(&f.all, "all", false, "include tool calls and their output")
+	set.IntVar(&f.budget, "budget", DefaultBudget, "cap total output characters (0 = unlimited)")
 	return f
 }
 
@@ -152,6 +171,7 @@ func (f *commonFlags) outputOptions(truncated bool) output.Options {
 		Full:          f.full,
 		Truncated:     truncated,
 		UseProse:      !f.all,
+		Budget:        f.budget,
 	}
 }
 
@@ -208,7 +228,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return emit(stdout, msgs, f.outputOptions(false))
+	return emit(stdout, stderr, msgs, f.outputOptions(false))
 }
 
 func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
@@ -269,7 +289,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if truncated {
 		msgs = msgs[:*limit]
 	}
-	return emit(stdout, msgs, f.outputOptions(truncated))
+	return emit(stdout, stderr, msgs, f.outputOptions(truncated))
 }
 
 func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
@@ -304,11 +324,51 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func emit(stdout io.Writer, msgs []transcript.Message, opts output.Options) error {
-	encoded, err := json.Marshal(output.Format(msgs, opts))
+func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Options) error {
+	resp := output.Format(msgs, opts)
+	encoded, err := json.Marshal(resp)
 	if err != nil {
 		return err
 	}
+	if resp.BudgetHit {
+		fmt.Fprintf(stderr, "cc-search: warning: output capped at the %d character budget "+
+			"(%d of %d messages shown); raise or disable it with --budget\n",
+			opts.Budget, resp.Total, len(msgs))
+	}
 	_, err = fmt.Fprintln(stdout, string(encoded))
 	return err
+}
+
+func runRead(args []string, cfg Config, stdout, stderr io.Writer) error {
+	f := newFlagSet("read", stderr)
+	before := f.set.Int("before", defaultReadContext, "messages of context before")
+	after := f.set.Int("after", defaultReadContext, "messages of context after")
+
+	if len(args) == 0 {
+		return fmt.Errorf("%w: read needs a message id", errUsage)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("%w: the message id must come before the flags, got %q",
+			errUsage, args[0])
+	}
+	id, args := args[0], args[1:]
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	msgs, err := db.Around(id, *before, *after, !f.all)
+	if err != nil {
+		return err
+	}
+	return emit(stdout, stderr, msgs, f.outputOptions(false))
 }
