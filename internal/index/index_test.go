@@ -1,9 +1,11 @@
 package index
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +32,16 @@ func writeTranscript(t *testing.T, dir, sessionID string, msgs []msg) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// writeRawTranscript writes literal JSONL lines, for records that the simple
+// msg fixture cannot express (block content, tool calls).
+func writeRawTranscript(t *testing.T, dir, sessionID string, lines []string) {
+	t.Helper()
+	path := filepath.Join(dir, sessionID+".jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // newIndex opens a fresh index over a transcript dir seeded with msgs.
@@ -234,6 +246,95 @@ func TestOpenRebuildsCorruptIndex(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d messages, want 1", len(got))
+	}
+}
+
+func TestOpenDiscardsIndexBuiltByAnOlderSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	legacy, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly the v1 schema: no prose column, single-column FTS table.
+	if _, err := legacy.Exec(`
+		CREATE TABLE messages (
+		  id TEXT PRIMARY KEY, sessionId TEXT, timestamp INTEGER, type TEXT,
+		  content TEXT, charCount INTEGER, isRecap INTEGER NOT NULL DEFAULT 0);
+		CREATE VIRTUAL TABLE messages_fts USING fts5(content, content=messages, content_rowid=rowid);
+		CREATE TABLE files (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER);
+		INSERT INTO messages VALUES ('stale', 's0', 0, 'user', 'from the old schema', 19, 0);`); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on an outdated index returned an error: %v", err)
+	}
+	defer db.Close()
+
+	dir := t.TempDir()
+	writeTranscript(t, dir, "session-a", []msg{{"user", "fresh message", 5}})
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatalf("Sync after migration failed: %v", err)
+	}
+	got, err := db.Last(LastOptions{N: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "fresh message" {
+		t.Fatalf("got %+v, want only the freshly indexed message", got)
+	}
+}
+
+func TestSearchProseOnlyIgnoresToolArguments(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	writeRawTranscript(t, dir, "session-a", []string{
+		fmt.Sprintf(`{"type":"assistant","uuid":"t1","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"caddy.json"}},`+
+			`{"type":"text","text":"checking now"}]}}`, ts),
+		fmt.Sprintf(`{"type":"assistant","uuid":"t2","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"text","text":"the caddy config moved to the HP"}]}}`, ts),
+	})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := db.Search(SearchOptions{Query: "caddy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unfiltered search got %d results, want 2", len(all))
+	}
+
+	got, err := db.Search(SearchOptions{Query: "caddy", ProseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1 — the tool-argument match is not prose", len(got))
+	}
+	if got[0].ID != "t2" {
+		t.Errorf("matched %q, want the message whose prose mentions caddy", got[0].ID)
+	}
+}
+
+func TestSearchProseOnlyMatchesPlainStringContent(t *testing.T) {
+	db, _ := newIndex(t, []msg{{"user", "restart the caddy container", 10}})
+
+	got, err := db.Search(SearchOptions{Query: "caddy", ProseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1 — plain string content is all prose", len(got))
 	}
 }
 

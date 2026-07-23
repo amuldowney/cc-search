@@ -1,6 +1,9 @@
 package transcript
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseLineExtractsUserStringContent(t *testing.T) {
 	line := []byte(`{"type":"user","uuid":"9d66de75","sessionId":"62de7038",
@@ -148,6 +151,42 @@ func TestParseLineFlagsAssistantRecap(t *testing.T) {
 	}
 	if !msg.IsRecap {
 		t.Error("IsRecap = false, want true for assistant message containing 'recap'")
+	}
+}
+
+func TestParseLineSeparatesProseFromToolBlocks(t *testing.T) {
+	line := []byte(`{"type":"assistant","uuid":"p1","sessionId":"s1",
+		"timestamp":"2026-07-23T03:51:36.301Z",
+		"message":{"content":[
+			{"type":"thinking","thinking":"internal deliberation"},
+			{"type":"tool_use","name":"Bash","input":{"command":"ls"}},
+			{"type":"text","text":"Here is what I found"}]}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.Prose != "Here is what I found" {
+		t.Errorf("Prose = %q, want only the text block", msg.Prose)
+	}
+	if !strings.Contains(msg.Content, "[tool: Bash]") {
+		t.Errorf("Content = %q, want the tool call still indexed", msg.Content)
+	}
+}
+
+func TestParseLineTreatsStringContentAsProse(t *testing.T) {
+	line := []byte(`{"type":"user","uuid":"p2","sessionId":"s1",
+		"timestamp":"2026-07-23T03:51:36.301Z",
+		"message":{"content":"restart the caddy container"}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.Prose != "restart the caddy container" {
+		t.Errorf("Prose = %q", msg.Prose)
 	}
 }
 

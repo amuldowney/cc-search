@@ -171,6 +171,35 @@ func TestSearchRecapsOnlyFlag(t *testing.T) {
 	}
 }
 
+func TestProseFlagSkipsToolArgumentMatches(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	body := fmt.Sprintf(`{"type":"assistant","uuid":"c1","sessionId":"session-a","timestamp":%q,`+
+		`"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"caddy.json"}}]}}`+"\n"+
+		`{"type":"assistant","uuid":"c2","sessionId":"session-a","timestamp":%q,`+
+		`"message":{"content":[{"type":"text","text":"the caddy config moved"}]}}`+"\n", ts, ts)
+	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+
+	all, _, _ := run(t, cfg, "search", "caddy")
+	if all.Total != 2 {
+		t.Fatalf("unfiltered Total = %d, want 2", all.Total)
+	}
+
+	resp, stderr, code := run(t, cfg, "search", "caddy", "--prose")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1 — the tool-argument match is not prose", resp.Total)
+	}
+	if !strings.Contains(resp.Results[0].Preview, "moved") {
+		t.Errorf("Preview = %q, want the spoken message", resp.Results[0].Preview)
+	}
+}
+
 func TestSearchTypeFilter(t *testing.T) {
 	cfg := fixture(t, []msg{
 		{"user", "deploy the server", 30},

@@ -32,6 +32,7 @@ cc-search last --hours 2 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 cc-search search "grayscale waveform"
 cc-search search "display.cpp" --limit 5 --window-hours 48
 cc-search search "firmware rollout" --prefer-recaps
+cc-search search "why did the proxy break" --prose   # ignore tool args/output
 cc-search search "caddy proxy" --recaps-only --full
 
 # index maintenance (rarely needed — sync is automatic)
@@ -63,9 +64,19 @@ tool calls are rendered as `[tool: Name] {args}`, and tool results are indexed
 in full — so searches hit command output and file contents too. Metadata
 records (`mode`, `last-prompt`, `file-history-*`, hook attachments) are skipped.
 
+**Prose vs content.** Each message is indexed twice: `content` (everything,
+including tool arguments and command output) and `prose` (only what was
+actually said). `--prose` searches the second — without it, a query like
+"caddy proxy" is dominated by `[tool: Edit] {...}` messages whose arguments
+happen to contain the words. Use `--prose` for "what did we decide", and plain
+search when hunting a command, path, or piece of output.
+
 **Recaps.** An assistant message whose *prose* mentions "recap" is flagged
 `isRecap`. Tool-call arguments are deliberately excluded — otherwise running
 `cc-search --recaps-only` would flag its own command line as a recap.
+
+**Schema version.** The index records a version; an index written by an older
+build is discarded and rebuilt on open rather than migrated.
 
 ## Measured on the real corpus
 
@@ -75,7 +86,7 @@ records (`mode`, `last-prompt`, `file-history-*`, hook attachments) are skipped.
 |---|---|
 | Full rebuild | 6.5s |
 | Query (`last`, `search`) | 0.15–0.32s including the incremental sync |
-| Index size | 33 MB |
+| Index size | 40 MB |
 
 The index is larger than the design's 1 MB estimate because tool results — file
 dumps, command output — dominate the corpus. It is fully derived from the

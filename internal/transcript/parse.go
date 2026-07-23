@@ -15,6 +15,7 @@ type Message struct {
 	Timestamp int64 // unix milliseconds
 	Type      string
 	Content   string
+	Prose     string // just what was said: text blocks, no tool calls or results
 	CharCount int
 	IsRecap   bool
 }
@@ -69,10 +70,11 @@ func ParseLine(line []byte) (Message, bool) {
 		return Message{}, false
 	}
 
+	prose := strings.TrimSpace(spokenText(raw))
+
 	// A recap is something the assistant *said*, so only its prose counts —
 	// a tool call whose arguments mention recaps is not one.
-	isRecap := rec.Type == "assistant" &&
-		strings.Contains(strings.ToLower(spokenText(raw)), "recap")
+	isRecap := rec.Type == "assistant" && strings.Contains(strings.ToLower(prose), "recap")
 
 	return Message{
 		ID:        rec.UUID,
@@ -80,6 +82,7 @@ func ParseLine(line []byte) (Message, bool) {
 		Timestamp: ts.UnixMilli(),
 		Type:      rec.Type,
 		Content:   content,
+		Prose:     prose,
 		CharCount: len(content),
 		IsRecap:   isRecap,
 	}, true

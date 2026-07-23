@@ -40,6 +40,7 @@ search options:
   --session ID          restrict to one session
   --type TYPE           restrict to user, assistant, system, ...
   --prefer-recaps       sort recap messages first
+  --prose               match only spoken text, not tool arguments or output
   --recaps-only         return only recap messages
 
 output options (last and search):
@@ -200,6 +201,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	windowHours := f.set.Int("window-hours", 0, "only search the last H hours")
 	msgType := f.set.String("type", "", "restrict to a message type")
 	preferRecaps := f.set.Bool("prefer-recaps", false, "sort recap messages first")
+	prose := f.set.Bool("prose", false, "match only what was said, not tool arguments or output")
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 
 	if len(args) == 0 {
@@ -232,6 +234,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		SessionID:      f.session,
 		Type:           *msgType,
 		PreferRecaps:   *preferRecaps,
+		ProseOnly:      *prose,
 		RecapsOnly:     *recapsOnly,
 	})
 	if err != nil {

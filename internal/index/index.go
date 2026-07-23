@@ -16,6 +16,10 @@ import (
 	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
 
+// schemaVersion is bumped whenever the tables change. An index written by a
+// different version is discarded rather than migrated — it is all derived data.
+const schemaVersion = 2
+
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
   id        TEXT PRIMARY KEY,
@@ -23,12 +27,16 @@ CREATE TABLE IF NOT EXISTS messages (
   timestamp INTEGER,
   type      TEXT,
   content   TEXT,
+  prose     TEXT,
   charCount INTEGER,
   isRecap   INTEGER NOT NULL DEFAULT 0
 );
 
+-- content is everything (tool calls, command output); prose is only what was
+-- actually said, so a search can skip matches that live in tool arguments.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
+  prose,
   content=messages,
   content_rowid=rowid
 );
@@ -36,16 +44,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 CREATE INDEX IF NOT EXISTS idx_session_time ON messages(sessionId, timestamp DESC);
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+  INSERT INTO messages_fts(rowid, content, prose) VALUES (new.rowid, new.content, new.prose);
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+  INSERT INTO messages_fts(messages_fts, rowid, content, prose)
+    VALUES ('delete', old.rowid, old.content, old.prose);
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+  INSERT INTO messages_fts(messages_fts, rowid, content, prose)
+    VALUES ('delete', old.rowid, old.content, old.prose);
+  INSERT INTO messages_fts(rowid, content, prose) VALUES (new.rowid, new.content, new.prose);
 END;
 
 -- Tracks the mtime/size of each indexed transcript so a rescan only touches
@@ -85,6 +95,7 @@ type SearchOptions struct {
 	SessionID      string
 	Type           string
 	PreferRecaps   bool
+	ProseOnly      bool
 	RecapsOnly     bool
 }
 
@@ -100,8 +111,8 @@ func Open(path string) (*DB, error) {
 		return db, nil
 	}
 
-	// A damaged index is disposable — everything in it is derived from the
-	// transcripts, so throw it away and start clean rather than failing.
+	// A damaged or outdated index is disposable — everything in it is derived
+	// from the transcripts, so throw it away and start clean rather than fail.
 	if rmErr := os.Remove(path); rmErr != nil {
 		return nil, err
 	}
@@ -113,15 +124,41 @@ func open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	var version int
+	if err := handle.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("read schema version: %w", err)
+	}
+	if version != schemaVersion && !isEmpty(handle) {
+		handle.Close()
+		return nil, fmt.Errorf("index has schema version %d, want %d", version, schemaVersion)
+	}
+
 	if _, err := handle.Exec(schema); err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	if _, err := handle.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("set schema version: %w", err)
 	}
 	if _, err := handle.Exec(`PRAGMA quick_check`); err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("integrity check: %w", err)
 	}
 	return &DB{sql: handle}, nil
+}
+
+// isEmpty reports whether the database has no tables yet, which is how a
+// freshly created file is told apart from one written by another version.
+func isEmpty(handle *sql.DB) bool {
+	var tables int
+	if err := handle.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table'`).
+		Scan(&tables); err != nil {
+		return false
+	}
+	return tables == 0
 }
 
 // Close releases the database handle.
@@ -204,13 +241,14 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 
 	insert, err := tx.Prepare(`
-		INSERT INTO messages (id, sessionId, timestamp, type, content, charCount, isRecap)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (id, sessionId, timestamp, type, content, prose, charCount, isRecap)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			sessionId = excluded.sessionId,
 			timestamp = excluded.timestamp,
 			type      = excluded.type,
 			content   = excluded.content,
+			prose     = excluded.prose,
 			charCount = excluded.charCount,
 			isRecap   = excluded.isRecap`)
 	if err != nil {
@@ -230,7 +268,7 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 			msg.SessionID = session
 		}
 		if _, err := insert.Exec(msg.ID, msg.SessionID, msg.Timestamp, msg.Type,
-			msg.Content, msg.CharCount, msg.IsRecap); err != nil {
+			msg.Content, msg.Prose, msg.CharCount, msg.IsRecap); err != nil {
 			return 0, err
 		}
 		count++
@@ -281,6 +319,9 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 	match := ftsQuery(opts.Query)
 	if match == "" {
 		return nil, nil
+	}
+	if opts.ProseOnly {
+		match = "{prose} : (" + match + ")"
 	}
 
 	// The window is the slice of recent history to search within: the newest
