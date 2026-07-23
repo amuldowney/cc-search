@@ -45,7 +45,9 @@ cc-search rebuild
 cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 ```
 
-Terms are ANDed. When a multi-word query matches nothing, the search retries
+Terms are stemmed with porter and prefix matched, so `cache` finds `caching`
+without matching anything inside `display.cpp` or `192.168.1.112`. Terms are
+ANDed. When a multi-word query matches nothing, the search retries
 with any term rather than reporting the topic was never discussed, and says so
 with `"relaxed": true` plus a note on stderr — those hits are related, not
 exact. `--any` asks for that behaviour up front.

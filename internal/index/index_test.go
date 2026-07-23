@@ -730,3 +730,64 @@ func TestSearchAnyMatchesEitherTerm(t *testing.T) {
 		t.Fatalf("got %d results, want 2 with Any", len(got))
 	}
 }
+
+func TestSearchMatchesInflectedForms(t *testing.T) {
+	db, _ := newIndex(t, []msg{
+		{"user", "we discussed the caching strategy", 30},
+		{"assistant", "we deployed it cleanly", 20},
+	})
+
+	for _, tc := range []struct{ query, want string }{
+		{"cache", "we discussed the caching strategy"},
+		{"deploy", "we deployed it cleanly"},
+	} {
+		got, err := db.Search(SearchOptions{Query: tc.query})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Content != tc.want {
+			t.Errorf("%q matched %v, want %q", tc.query, contents(got), tc.want)
+		}
+	}
+}
+
+func TestSearchKeepsIdentifiersLiteralUnderStemming(t *testing.T) {
+	db, _ := newIndex(t, []msg{
+		{"user", "set CARGO_TARGET_DIR before building", 30},
+		{"user", "the host is 192.168.1.112 on the lan", 20},
+		{"user", "edit display.cpp for the waveform", 10},
+	})
+
+	for _, q := range []string{"CARGO_TARGET_DIR", "192.168.1.112", "display.cpp"} {
+		got, err := db.Search(SearchOptions{Query: q})
+		if err != nil {
+			t.Fatalf("%q: %v", q, err)
+		}
+		if len(got) != 1 {
+			t.Errorf("%q matched %d messages, want 1 — identifiers must stay literal",
+				q, len(got))
+		}
+	}
+}
+
+// TestSearchStemmingSplitsMentNominalizations records a known limitation of
+// the porter stemmer rather than a desired behaviour. "deploy", "deployed"
+// and "deploying" all stem to "deploi", but stripping "-ment" from
+// "deployment" yields "deploy", a different stem, so the noun and the verb do
+// not find each other. This is the cost measured when stemming was adopted;
+// the gains on -ing/-ed forms were far larger.
+func TestSearchStemmingSplitsMentNominalizations(t *testing.T) {
+	db, _ := newIndex(t, []msg{
+		{"user", "the deployment finished", 30},
+		{"user", "we deployed it", 20},
+	})
+
+	got, err := db.Search(SearchOptions{Query: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "we deployed it" {
+		t.Errorf("%q matched, want only the verb form — if this now also matches "+
+			"the noun, the stemmer improved and this test can go", contents(got))
+	}
+}

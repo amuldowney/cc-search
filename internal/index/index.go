@@ -20,7 +20,7 @@ import (
 
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -36,11 +36,17 @@ CREATE TABLE IF NOT EXISTS messages (
 
 -- content is everything (tool calls, command output); prose is only what was
 -- actually said, so a search can skip matches that live in tool arguments.
+--
+-- The porter stemmer folds inflected forms together, so "cache" finds
+-- "caching" and "deploy" finds "deployed". Identifiers are unaffected: there
+-- is nothing to stem in display.cpp or 192.168.1.112, and measurement over the
+-- real corpus showed their hit counts unchanged.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
   prose,
   content=messages,
-  content_rowid=rowid
+  content_rowid=rowid,
+  tokenize='porter unicode61'
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_time ON messages(sessionId, timestamp DESC);
