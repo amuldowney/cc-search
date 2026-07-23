@@ -151,6 +151,23 @@ func TestParseLineFlagsAssistantRecap(t *testing.T) {
 	}
 }
 
+func TestParseLineDoesNotFlagRecapInsideToolBlocks(t *testing.T) {
+	line := []byte(`{"type":"assistant","uuid":"r3","sessionId":"s1",
+		"timestamp":"2026-07-23T03:51:36.301Z",
+		"message":{"content":[
+			{"type":"tool_use","name":"Bash","input":{"command":"cc-search --recaps-only"}},
+			{"type":"text","text":"Here are the results"}]}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.IsRecap {
+		t.Error("IsRecap = true; a tool call that mentions recaps is not a recap")
+	}
+}
+
 func TestParseLineDoesNotFlagUserRecap(t *testing.T) {
 	line := []byte(`{"type":"user","uuid":"r2","sessionId":"s1",
 		"timestamp":"2026-07-23T03:51:36.301Z",

@@ -69,6 +69,11 @@ func ParseLine(line []byte) (Message, bool) {
 		return Message{}, false
 	}
 
+	// A recap is something the assistant *said*, so only its prose counts —
+	// a tool call whose arguments mention recaps is not one.
+	isRecap := rec.Type == "assistant" &&
+		strings.Contains(strings.ToLower(spokenText(raw)), "recap")
+
 	return Message{
 		ID:        rec.UUID,
 		SessionID: rec.SessionID,
@@ -76,8 +81,30 @@ func ParseLine(line []byte) (Message, bool) {
 		Type:      rec.Type,
 		Content:   content,
 		CharCount: len(content),
-		IsRecap:   rec.Type == "assistant" && strings.Contains(strings.ToLower(content), "recap"),
+		IsRecap:   isRecap,
 	}, true
+}
+
+// spokenText returns only the prose of a content field: the whole thing when
+// it is a plain string, otherwise just its text blocks.
+func spokenText(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+
+	var blocks []block
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // extractContent flattens a content field that may be a plain string or an

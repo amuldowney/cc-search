@@ -1,0 +1,333 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/andrewmuldowney/cc-search/internal/output"
+)
+
+type msg struct {
+	typ        string
+	content    string
+	minutesAgo int
+}
+
+func fixture(t *testing.T, msgs []msg) Config {
+	t.Helper()
+	dir := t.TempDir()
+	var body string
+	for i, m := range msgs {
+		ts := time.Now().Add(-time.Duration(m.minutesAgo) * time.Minute).UTC()
+		body += fmt.Sprintf(
+			`{"type":%q,"uuid":"u-%d","sessionId":"session-a","timestamp":%q,"message":{"content":%q}}`+"\n",
+			m.typ, i, ts.Format(time.RFC3339Nano), m.content)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Config{
+		IndexPath:     filepath.Join(t.TempDir(), "index.db"),
+		TranscriptDir: dir,
+	}
+}
+
+// run executes the CLI and decodes its JSON output.
+func run(t *testing.T, cfg Config, args ...string) (output.Response, string, int) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := Run(args, cfg, &stdout, &stderr)
+
+	var resp output.Response
+	if stdout.Len() > 0 {
+		if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+		}
+	}
+	return resp, stderr.String(), code
+}
+
+func TestLastReturnsRequestedCount(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "oldest", 30},
+		{"user", "middle", 20},
+		{"user", "newest", 10},
+	})
+
+	resp, stderr, code := run(t, cfg, "last", "2")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
+	}
+	if resp.Results[0].Preview != "newest" {
+		t.Errorf("first result = %q, want newest", resp.Results[0].Preview)
+	}
+}
+
+func TestLastDefaultsToTenMessages(t *testing.T) {
+	var msgs []msg
+	for i := 0; i < 15; i++ {
+		msgs = append(msgs, msg{"user", fmt.Sprintf("message %d", i), 60 - i})
+	}
+	cfg := fixture(t, msgs)
+
+	resp, stderr, code := run(t, cfg, "last")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 10 {
+		t.Errorf("Total = %d, want the default of 10", resp.Total)
+	}
+}
+
+func TestLastHoursFlag(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "long ago", 60 * 6},
+		{"user", "just now", 5},
+	})
+
+	resp, stderr, code := run(t, cfg, "last", "--hours", "2")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || resp.Results[0].Preview != "just now" {
+		t.Errorf("results = %+v, want only the recent message", resp.Results)
+	}
+}
+
+func TestSearchFindsMatch(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "the waveform table lives in display.cpp", 20},
+		{"user", "unrelated", 10},
+	})
+
+	resp, stderr, code := run(t, cfg, "search", "waveform")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if !strings.Contains(resp.Results[0].Preview, "waveform") {
+		t.Errorf("Preview = %q", resp.Results[0].Preview)
+	}
+}
+
+func TestSearchTruncatedWhenMoreResultsExist(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "grayscale one", 30},
+		{"user", "grayscale two", 20},
+		{"user", "grayscale three", 10},
+	})
+
+	resp, _, _ := run(t, cfg, "search", "grayscale", "--limit", "2")
+
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
+	}
+	if !resp.Truncated {
+		t.Error("Truncated = false, want true when results were cut off")
+	}
+}
+
+func TestSearchNotTruncatedWhenLimitNotReached(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "grayscale one", 30}})
+
+	resp, _, _ := run(t, cfg, "search", "grayscale", "--limit", "5")
+
+	if resp.Truncated {
+		t.Error("Truncated = true, want false when every match was returned")
+	}
+}
+
+func TestSearchRecapsOnlyFlag(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"assistant", "recap: the proxy moved to the HP", 30},
+		{"assistant", "the proxy moved to the HP", 20},
+	})
+
+	resp, stderr, code := run(t, cfg, "search", "proxy", "--recaps-only")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || !resp.Results[0].IsRecap {
+		t.Errorf("results = %+v, want a single recap", resp.Results)
+	}
+	if resp.RecapCount != 1 {
+		t.Errorf("RecapCount = %d, want 1", resp.RecapCount)
+	}
+}
+
+func TestSearchTypeFilter(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "deploy the server", 30},
+		{"assistant", "deploy finished", 20},
+	})
+
+	resp, _, _ := run(t, cfg, "search", "deploy", "--type", "user")
+
+	if resp.Total != 1 || resp.Results[0].Type != "user" {
+		t.Errorf("results = %+v, want one user message", resp.Results)
+	}
+}
+
+func TestFullFlagIncludesContent(t *testing.T) {
+	body := strings.Repeat("x", 300)
+	cfg := fixture(t, []msg{{"user", "portfolio " + body, 10}})
+
+	resp, _, _ := run(t, cfg, "search", "portfolio", "--full")
+
+	if resp.Results[0].Content != "portfolio "+body {
+		t.Errorf("Content = %q, want the whole message body", resp.Results[0].Content)
+	}
+}
+
+func TestPreviewLengthFlag(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", strings.Repeat("y", 200), 10}})
+
+	resp, _, _ := run(t, cfg, "last", "1", "--preview-length", "20")
+
+	if len([]rune(resp.Results[0].Preview)) != 21 {
+		t.Errorf("preview = %q, want 20 runes plus an ellipsis", resp.Results[0].Preview)
+	}
+}
+
+func TestSessionFlagFiltersResults(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "from a", 10}})
+	other := filepath.Join(cfg.TranscriptDir, "session-b.jsonl")
+	line := fmt.Sprintf(
+		`{"type":"user","uuid":"b-1","sessionId":"session-b","timestamp":%q,"message":{"content":"from b"}}`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(other, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, _, _ := run(t, cfg, "last", "10", "--session", "session-b")
+
+	if resp.Total != 1 || resp.Results[0].Preview != "from b" {
+		t.Errorf("results = %+v, want only session-b", resp.Results)
+	}
+}
+
+func TestRebuildReportsIndexedCounts(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "hello", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"rebuild"}, cfg, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1") {
+		t.Errorf("rebuild output does not report a count: %q", stdout.String())
+	}
+}
+
+func TestIndexPersistsBetweenInvocations(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "persisted message", 10}})
+
+	if _, _, code := run(t, cfg, "last", "1"); code != 0 {
+		t.Fatal("first invocation failed")
+	}
+	if err := os.RemoveAll(cfg.TranscriptDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// The transcripts are gone but the index should still answer.
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"last", "1"}, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+	}
+	var resp output.Response
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 {
+		t.Errorf("Total = %d, want 1 from the persisted index", resp.Total)
+	}
+}
+
+func TestNoMatchReturnsEmptyResultsAndZeroExit(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "hello", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "nonexistentterm"}, cfg, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 for an empty result", code)
+	}
+	want := `{"results":[],"total":0,"recapCount":0,"truncated":false}`
+	if strings.TrimSpace(stdout.String()) != want {
+		t.Errorf("got %s, want %s", stdout.String(), want)
+	}
+}
+
+func TestUnknownCommandFails(t *testing.T) {
+	cfg := fixture(t, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"frobnicate"}, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Error("exit code = 0, want non-zero for an unknown command")
+	}
+	if stderr.Len() == 0 {
+		t.Error("nothing written to stderr for an unknown command")
+	}
+}
+
+func TestNoArgsPrintsUsage(t *testing.T) {
+	cfg := fixture(t, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Error("exit code = 0, want non-zero when no command is given")
+	}
+	if !strings.Contains(stderr.String(), "usage") {
+		t.Errorf("stderr does not contain usage text: %q", stderr.String())
+	}
+}
+
+func TestSearchRequiresPattern(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "hello", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search"}, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Error("exit code = 0, want non-zero when no pattern is given")
+	}
+}
+
+func TestMissingTranscriptDirIsNotFatal(t *testing.T) {
+	cfg := Config{
+		IndexPath:     filepath.Join(t.TempDir(), "index.db"),
+		TranscriptDir: filepath.Join(t.TempDir(), "does-not-exist"),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"last", "5"}, cfg, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 with a warning, stderr = %s", code, stderr.String())
+	}
+	if stderr.Len() == 0 {
+		t.Error("expected a warning on stderr about the missing transcript dir")
+	}
+}
