@@ -84,6 +84,7 @@ type LastOptions struct {
 	N         int
 	Hours     int
 	SessionID string
+	Type      string
 }
 
 // SearchOptions selects messages matching a full-text query.
@@ -300,6 +301,10 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 	if opts.SessionID != "" {
 		query += ` AND sessionId = ?`
 		args = append(args, opts.SessionID)
+	}
+	if opts.Type != "" {
+		query += ` AND type = ?`
+		args = append(args, opts.Type)
 	}
 	if opts.Hours > 0 {
 		query += ` AND timestamp >= ?`

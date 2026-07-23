@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/andrewmuldowney/cc-search/internal/index"
 	"github.com/andrewmuldowney/cc-search/internal/output"
@@ -29,7 +30,8 @@ const defaultLastCount = 10
 const usage = `usage: cc-search <command> [options]
 
 commands:
-  last [N] [--hours H] [--session ID]   most recent messages (default N=10)
+  last [N] [--hours H] [--session ID] [--type TYPE]
+                                        most recent messages (default N=10)
   search PATTERN [options]              full-text search across transcripts
   rebuild [--session ID]                discard and rebuild the index
 
@@ -97,10 +99,16 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 
 	if err != nil {
 		fmt.Fprintf(stderr, "cc-search: %v\n", err)
+		if errors.Is(err, errUsage) || errors.Is(err, flag.ErrHelp) {
+			return 2
+		}
 		return 1
 	}
 	return 0
 }
+
+// errUsage marks errors caused by how the command was invoked, which exit 2.
+var errUsage = errors.New("usage")
 
 // commonFlags are shared by every command that reads or writes the index.
 type commonFlags struct {
@@ -165,6 +173,7 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	f := newFlagSet("last", stderr)
 	hours := f.set.Int("hours", 0, "only messages from the last H hours")
+	msgType := f.set.String("type", "", "restrict to a message type")
 
 	// A bare count may precede the flags: `cc-search last 10 --session X`.
 	count := 0
@@ -174,7 +183,10 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 		}
 	}
 	if err := f.set.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
 	}
 	if count == 0 && *hours == 0 {
 		count = defaultLastCount
@@ -187,7 +199,8 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	}
 	defer db.Close()
 
-	msgs, err := db.Last(index.LastOptions{N: count, Hours: *hours, SessionID: f.session})
+	msgs, err := db.Last(index.LastOptions{
+		N: count, Hours: *hours, SessionID: f.session, Type: *msgType})
 	if err != nil {
 		return err
 	}
@@ -205,11 +218,19 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 
 	if len(args) == 0 {
-		return errors.New("search needs a pattern")
+		return fmt.Errorf("%w: search needs a pattern", errUsage)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("%w: the search pattern must come before the flags, "+
+			"got %q in the pattern position", errUsage, args[0])
 	}
 	pattern, args := args[0], args[1:]
 	if err := f.set.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q — quote multi-word patterns",
+			errUsage, f.set.Arg(0))
 	}
 
 	cfg = f.resolve(cfg)
@@ -255,7 +276,7 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 	indexPath := set.String("index", "", "index database to use")
 	transcriptDir := set.String("transcripts", "", "transcript directory to index")
 	if err := set.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if *indexPath != "" {
 		cfg.IndexPath = *indexPath

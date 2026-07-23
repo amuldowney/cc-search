@@ -27,6 +27,7 @@ mtime or size changed.
 # memory refresh
 cc-search last 10
 cc-search last --hours 2 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
+cc-search last 30 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47 --type user
 
 # concept research
 cc-search search "grayscale waveform"
@@ -40,8 +41,12 @@ cc-search rebuild
 cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 ```
 
+The search pattern is positional and must come before the flags — putting a
+flag there is rejected rather than searched for.
+
 Output is one line of JSON on stdout; warnings and errors go to stderr, so
-`cc-search ... | jq` is always safe.
+`cc-search ... | jq` is always safe. Exit 0 (including for zero results), 1 on
+error, 2 on a usage mistake.
 
 ```json
 {"results":[{"id":"...","sessionId":"...","timestamp":"2026-07-23T04:01:04Z",

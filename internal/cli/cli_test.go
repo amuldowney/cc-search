@@ -333,6 +333,59 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 	}
 }
 
+func TestSearchRejectsFlagInPatternPosition(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "caddy proxy notes", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "--prose", "caddy"}, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("exit code = 0; a flag in the pattern position silently searches for the flag: %s",
+			stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "pattern") {
+		t.Errorf("stderr = %q, want an explanation that the pattern comes first", stderr.String())
+	}
+}
+
+func TestSearchRejectsStrayArgumentAfterFlags(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "caddy proxy notes", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "caddy", "--limit", "2", "proxy"}, cfg, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("exit code = 0; a stray argument was silently ignored: %s", stdout.String())
+	}
+}
+
+func TestLastFiltersByType(t *testing.T) {
+	cfg := fixture(t, []msg{
+		{"user", "what is broken", 30},
+		{"assistant", "the proxy is broken", 20},
+	})
+
+	resp, stderr, code := run(t, cfg, "last", "10", "--type", "user")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || resp.Results[0].Type != "user" {
+		t.Errorf("results = %+v, want only the user message", resp.Results)
+	}
+}
+
+func TestUnknownFlagExitsWithUsageCode(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "hello", 10}})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"search", "hello", "--nosuchflag"}, cfg, &stdout, &stderr)
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 for a usage error", code)
+	}
+}
+
 func TestSearchRequiresPattern(t *testing.T) {
 	cfg := fixture(t, []msg{{"user", "hello", 10}})
 
