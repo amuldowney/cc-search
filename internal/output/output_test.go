@@ -156,7 +156,7 @@ func TestFormatMarshalsEmptyResultsAsArray(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,` +
+	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,"relaxed":false,` +
 		`"budget":{"limit":0,"spent":0,"dropped":0,"shrunk":false}}`
 	if string(encoded) != want {
 		t.Errorf("got %s, want %s", encoded, want)

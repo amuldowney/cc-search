@@ -100,7 +100,9 @@ type SearchOptions struct {
 	Type           string
 	PreferRecaps   bool
 	ProseOnly      bool
-	RecapsOnly     bool
+	// Any matches messages containing any term rather than all of them.
+	Any        bool
+	RecapsOnly bool
 }
 
 // Open opens (creating if needed) the index at path.
@@ -327,7 +329,7 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 
 // Search returns messages matching opts.Query, most relevant first.
 func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
-	match := ftsQuery(opts.Query)
+	match := ftsQuery(opts.Query, opts.Any)
 	if match == "" {
 		return nil, nil
 	}
@@ -417,14 +419,22 @@ func prefixed(columns, alias string) string {
 // ftsQuery turns a user pattern into an FTS5 MATCH expression. Each whitespace
 // separated term becomes a quoted prefix term, so punctuation-heavy patterns
 // like "display.cpp" are matched literally instead of parsed as FTS syntax.
-func ftsQuery(pattern string) string {
+// Terms are ANDed unless any is set.
+func ftsQuery(pattern string, any bool) string {
 	var terms []string
 	for _, field := range strings.Fields(pattern) {
 		escaped := strings.ReplaceAll(field, `"`, `""`)
 		terms = append(terms, `"`+escaped+`"*`)
 	}
-	return strings.Join(terms, " ")
+	join := " "
+	if any {
+		join = " OR "
+	}
+	return strings.Join(terms, join)
 }
+
+// TermCount reports how many terms a pattern will search for.
+func TermCount(pattern string) int { return len(strings.Fields(pattern)) }
 
 // ErrNoSuchID and ErrAmbiguousID report why a message address did not resolve.
 var (

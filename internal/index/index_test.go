@@ -706,3 +706,27 @@ func TestAroundProseOnlySkipsToolNeighboursButKeepsTarget(t *testing.T) {
 		t.Errorf("got %v, want the addressed message itself", contents(target))
 	}
 }
+
+func TestSearchAnyMatchesEitherTerm(t *testing.T) {
+	db, _ := newIndex(t, []msg{
+		{"user", "alpha and beta together", 30},
+		{"user", "gamma on its own", 20},
+		{"user", "nothing relevant", 10},
+	})
+
+	strict, err := db.Search(SearchOptions{Query: "alpha gamma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strict) != 0 {
+		t.Fatalf("got %d results, want 0 — terms are ANDed by default", len(strict))
+	}
+
+	got, err := db.Search(SearchOptions{Query: "alpha gamma", Any: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d results, want 2 with Any", len(got))
+	}
+}

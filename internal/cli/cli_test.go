@@ -356,7 +356,7 @@ func TestNoMatchReturnsEmptyResultsAndZeroExit(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 for an empty result", code)
 	}
-	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,` +
+	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,"relaxed":false,` +
 		`"budget":{"limit":60000,"spent":0,"dropped":0,"shrunk":false}}`
 	if strings.TrimSpace(stdout.String()) != want {
 		t.Errorf("got %s, want %s", stdout.String(), want)
@@ -608,5 +608,93 @@ func TestBudgetZeroDisablesTheCap(t *testing.T) {
 	if len(resp.Results[0].Content) != 120000 {
 		t.Errorf("content is %d chars, want the full 120000 with --budget 0",
 			len(resp.Results[0].Content))
+	}
+}
+
+func termFixture(t *testing.T) Config {
+	return fixture(t, []msg{
+		{"user", "alpha and beta together", 30},
+		{"user", "gamma on its own", 20},
+		{"user", "nothing relevant here", 10},
+	})
+}
+
+func TestSearchRelaxesToAnyWhenNothingMatchesAllTerms(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, stderr, code := run(t, cfg, "search", "alpha gamma")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2 — an empty AND query should relax to OR", resp.Total)
+	}
+	if !resp.Relaxed {
+		t.Error("Relaxed = false; the caller must be able to tell this was not an exact match")
+	}
+	if !strings.Contains(stderr, "relax") {
+		t.Errorf("stderr = %q, want a note that the query was relaxed", stderr)
+	}
+}
+
+func TestSearchDoesNotRelaxWhenAllTermsMatch(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, _, code := run(t, cfg, "search", "alpha beta")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if resp.Total != 1 || resp.Relaxed {
+		t.Errorf("Total = %d, Relaxed = %v; want the strict match kept", resp.Total, resp.Relaxed)
+	}
+}
+
+func TestSearchDoesNotRelaxASingleTerm(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, _, code := run(t, cfg, "search", "nonexistentterm")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if resp.Total != 0 {
+		t.Errorf("Total = %d, want 0", resp.Total)
+	}
+	if resp.Relaxed {
+		t.Error("Relaxed = true; there is nothing to relax in a one word query")
+	}
+}
+
+func TestAnyFlagIsNotReportedAsRelaxed(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, _, code := run(t, cfg, "search", "alpha gamma", "--any")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
+	}
+	if resp.Relaxed {
+		t.Error("Relaxed = true; OR was asked for, not fallen back to")
+	}
+}
+
+func TestRelaxedWarningCountsWhatWasReturned(t *testing.T) {
+	cfg := termFixture(t)
+
+	resp, stderr, _ := run(t, cfg, "search", "alpha gamma", "--limit", "1")
+
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if strings.Contains(stderr, "2 result") {
+		t.Errorf("stderr = %q; it reports the over-fetch count, not what was returned", stderr)
+	}
+	if !strings.Contains(stderr, "1 result") {
+		t.Errorf("stderr = %q, want it to report 1 result", stderr)
 	}
 }

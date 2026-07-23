@@ -50,6 +50,7 @@ search options:
   --window-hours H      only search the last H hours
   --session ID          restrict to one session
   --type TYPE           restrict to user, assistant, system, ...
+  --any                 match any term (default: every term must appear)
   --prefer-recaps       sort recap messages first
   --recaps-only         return only recap messages
 
@@ -239,6 +240,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	msgType := f.set.String("type", "", "restrict to a message type")
 	preferRecaps := f.set.Bool("prefer-recaps", false, "sort recap messages first")
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
+	any := f.set.Bool("any", false, "match any term rather than all of them")
 
 	if len(args) == 0 {
 		return fmt.Errorf("%w: search needs a pattern", errUsage)
@@ -270,7 +272,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		queryLimit++
 	}
 
-	msgs, err := db.Search(index.SearchOptions{
+	search := index.SearchOptions{
 		Query:          pattern,
 		Limit:          queryLimit,
 		WindowMessages: *windowMessages,
@@ -280,16 +282,37 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		PreferRecaps:   *preferRecaps,
 		ProseOnly:      !f.all,
 		RecapsOnly:     *recapsOnly,
-	})
+		Any:            *any,
+	}
+	msgs, err := db.Search(search)
 	if err != nil {
 		return err
+	}
+
+	// A multi-term query that matches nothing is usually over-constrained
+	// rather than genuinely absent, so fall back to matching any term and say
+	// so rather than reporting the topic was never discussed.
+	relaxed := false
+	if len(msgs) == 0 && !*any && index.TermCount(pattern) > 1 {
+		search.Any = true
+		if msgs, err = db.Search(search); err != nil {
+			return err
+		}
+		relaxed = len(msgs) > 0
 	}
 
 	truncated := *limit > 0 && len(msgs) > *limit
 	if truncated {
 		msgs = msgs[:*limit]
 	}
-	return emit(stdout, stderr, msgs, f.outputOptions(truncated))
+	if relaxed {
+		fmt.Fprintf(stderr, "cc-search: no message contained every term; relaxed to any "+
+			"term (%d results). These are related, not exact.\n", len(msgs))
+	}
+
+	opts := f.outputOptions(truncated)
+	opts.Relaxed = relaxed
+	return emit(stdout, stderr, msgs, opts)
 }
 
 func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {

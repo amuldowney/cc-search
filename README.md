@@ -34,6 +34,7 @@ cc-search search "grayscale waveform"
 cc-search search "display.cpp" --limit 5 --window-hours 48
 cc-search search "firmware rollout" --prefer-recaps
 cc-search search "no such module: fts5" --all   # include tool calls + output
+cc-search search "battery dispatch reserve" --any  # any term, not all
 cc-search search "caddy proxy" --recaps-only --full
 
 # read a hit in context (id, or any unique prefix, from a search result)
@@ -43,6 +44,11 @@ cc-search read 36b182bb --before 3 --after 3
 cc-search rebuild
 cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 ```
+
+Terms are ANDed. When a multi-word query matches nothing, the search retries
+with any term rather than reporting the topic was never discussed, and says so
+with `"relaxed": true` plus a note on stderr — those hits are related, not
+exact. `--any` asks for that behaviour up front.
 
 `read` takes a message id from a search result — any unique prefix works — and
 returns it with its neighbours from the same session, oldest first. That is how
@@ -71,7 +77,7 @@ error, 2 on a usage mistake.
 ```json
 {"results":[{"id":"...","sessionId":"...","timestamp":"2026-07-23T04:01:04Z",
 "type":"assistant","isRecap":true,"preview":"Done. To recap: …","charCount":342}],
-"total":1,"recapCount":1,"truncated":false,
+"total":1,"recapCount":1,"truncated":false,"relaxed":false,
 "budget":{"limit":60000,"spent":342,"dropped":0,"shrunk":false}}
 ```
 

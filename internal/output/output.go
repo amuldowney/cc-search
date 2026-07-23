@@ -28,7 +28,10 @@ type Response struct {
 	Total      int      `json:"total"`
 	RecapCount int      `json:"recapCount"`
 	Truncated  bool     `json:"truncated"`
-	Budget     Budget   `json:"budget"`
+	// Relaxed reports that no message contained every term, so the search fell
+	// back to matching any of them. These are related hits, not exact ones.
+	Relaxed bool   `json:"relaxed"`
+	Budget  Budget `json:"budget"`
 }
 
 // Budget tells the caller what the character budget cost it, so it can decide
@@ -48,6 +51,7 @@ type Options struct {
 	PreviewLength int
 	Full          bool
 	Truncated     bool
+	Relaxed       bool
 	// UseProse renders each result from what was said rather than from the
 	// full message, which also contains tool calls and their output.
 	UseProse bool
@@ -96,6 +100,7 @@ func Format(msgs []transcript.Message, opts Options) Response {
 	resp := Response{
 		Results:   []Result{},
 		Truncated: opts.Truncated,
+		Relaxed:   opts.Relaxed,
 		Budget:    Budget{Limit: opts.Budget, Dropped: len(msgs) - keep},
 	}
 	if resp.Budget.Dropped > 0 {
