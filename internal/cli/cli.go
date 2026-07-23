@@ -330,10 +330,15 @@ func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Optio
 	if err != nil {
 		return err
 	}
-	if resp.BudgetHit {
-		fmt.Fprintf(stderr, "cc-search: warning: output capped at the %d character budget "+
-			"(%d of %d messages shown); raise or disable it with --budget\n",
-			opts.Budget, resp.Total, len(msgs))
+	switch b := resp.Budget; {
+	case b.Dropped > 0:
+		fmt.Fprintf(stderr, "cc-search: warning: the %d character budget dropped %d of %d "+
+			"messages (%d spent); raise or disable it with --budget\n",
+			b.Limit, b.Dropped, len(msgs), b.Spent)
+	case b.Shrunk:
+		fmt.Fprintf(stderr, "cc-search: warning: previews were shortened to fit the %d "+
+			"character budget (%d spent); raise or disable it with --budget\n",
+			b.Limit, b.Spent)
 	}
 	_, err = fmt.Fprintln(stdout, string(encoded))
 	return err

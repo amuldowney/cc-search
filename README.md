@@ -49,11 +49,17 @@ returns it with its neighbours from the same session, oldest first. That is how
 you recover *why* something was decided rather than just the sentence that
 decided it.
 
-Output is capped at 60,000 characters by default (`--budget N`, `0` disables).
-The cap never bites on ordinary queries; it stops `--full` on a huge tool
-result from flooding a context window. When it does bite, the dropped results
-are reported on stderr and `truncated` is true — one result is always returned,
-clipped if it alone exceeds the budget.
+Output is capped at 60,000 characters by default (`--budget N`, `0` disables),
+and the cap *shapes* the result set rather than just chopping its tail:
+previews shrink so every result still fits, down to a 40-character floor, and
+only then are results dropped. Under `--full` the opposite is right — bodies
+were asked for whole, so they are emitted whole until the budget runs out.
+
+Every response reports what it cost:
+
+```json
+"budget": {"limit": 60000, "spent": 414, "dropped": 0, "shrunk": false}
+```
 
 The search pattern is positional and must come before the flags — putting a
 flag there is rejected rather than searched for.
@@ -65,7 +71,8 @@ error, 2 on a usage mistake.
 ```json
 {"results":[{"id":"...","sessionId":"...","timestamp":"2026-07-23T04:01:04Z",
 "type":"assistant","isRecap":true,"preview":"Done. To recap: …","charCount":342}],
-"total":1,"recapCount":1,"truncated":false}
+"total":1,"recapCount":1,"truncated":false,
+"budget":{"limit":60000,"spent":342,"dropped":0,"shrunk":false}}
 ```
 
 Previews are collapsed to a single line and capped at 100 characters

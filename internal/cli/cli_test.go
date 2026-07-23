@@ -356,7 +356,8 @@ func TestNoMatchReturnsEmptyResultsAndZeroExit(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 for an empty result", code)
 	}
-	want := `{"results":[],"total":0,"recapCount":0,"truncated":false}`
+	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,` +
+		`"budget":{"limit":60000,"spent":0,"dropped":0,"shrunk":false}}`
 	if strings.TrimSpace(stdout.String()) != want {
 		t.Errorf("got %s, want %s", stdout.String(), want)
 	}
