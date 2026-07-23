@@ -171,7 +171,10 @@ func TestSearchRecapsOnlyFlag(t *testing.T) {
 	}
 }
 
-func TestProseFlagSkipsToolArgumentMatches(t *testing.T) {
+// toolAndProseFixture seeds one tool-only message and one spoken message,
+// both mentioning "caddy".
+func toolAndProseFixture(t *testing.T) Config {
+	t.Helper()
 	dir := t.TempDir()
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 	body := fmt.Sprintf(`{"type":"assistant","uuid":"c1","sessionId":"session-a","timestamp":%q,`+
@@ -181,22 +184,76 @@ func TestProseFlagSkipsToolArgumentMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+}
 
-	all, _, _ := run(t, cfg, "search", "caddy")
-	if all.Total != 2 {
-		t.Fatalf("unfiltered Total = %d, want 2", all.Total)
-	}
+func TestSearchIgnoresToolCallsByDefault(t *testing.T) {
+	cfg := toolAndProseFixture(t)
 
-	resp, stderr, code := run(t, cfg, "search", "caddy", "--prose")
+	resp, stderr, code := run(t, cfg, "search", "caddy")
+
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
 	}
 	if resp.Total != 1 {
-		t.Fatalf("Total = %d, want 1 — the tool-argument match is not prose", resp.Total)
+		t.Fatalf("Total = %d, want 1 — tool calls are ignored by default", resp.Total)
 	}
 	if !strings.Contains(resp.Results[0].Preview, "moved") {
 		t.Errorf("Preview = %q, want the spoken message", resp.Results[0].Preview)
+	}
+}
+
+func TestSearchAllFlagIncludesToolCalls(t *testing.T) {
+	cfg := toolAndProseFixture(t)
+
+	resp, stderr, code := run(t, cfg, "search", "caddy", "--all")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 2 {
+		t.Errorf("Total = %d, want 2 with --all", resp.Total)
+	}
+}
+
+func TestLastIgnoresToolCallsByDefault(t *testing.T) {
+	cfg := toolAndProseFixture(t)
+
+	resp, stderr, code := run(t, cfg, "last", "10")
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1 — tool-only messages are skipped", resp.Total)
+	}
+}
+
+func TestLastAllFlagIncludesToolCalls(t *testing.T) {
+	cfg := toolAndProseFixture(t)
+
+	resp, _, _ := run(t, cfg, "last", "10", "--all")
+
+	if resp.Total != 2 {
+		t.Errorf("Total = %d, want 2 with --all", resp.Total)
+	}
+}
+
+func TestPreviewShowsProseNotToolCallByDefault(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	body := fmt.Sprintf(`{"type":"assistant","uuid":"m1","sessionId":"session-a","timestamp":%q,`+
+		`"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"grep caddy"}},`+
+		`{"type":"text","text":"found the caddy entry"}]}}`+"\n", ts)
+	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+
+	resp, _, _ := run(t, cfg, "last", "1")
+
+	if resp.Results[0].Preview != "found the caddy entry" {
+		t.Errorf("Preview = %q, want the prose rather than the tool call", resp.Results[0].Preview)
 	}
 }
 

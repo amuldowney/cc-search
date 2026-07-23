@@ -33,7 +33,7 @@ cc-search last 30 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47 --type user
 cc-search search "grayscale waveform"
 cc-search search "display.cpp" --limit 5 --window-hours 48
 cc-search search "firmware rollout" --prefer-recaps
-cc-search search "why did the proxy break" --prose   # ignore tool args/output
+cc-search search "no such module: fts5" --all   # include tool calls + output
 cc-search search "caddy proxy" --recaps-only --full
 
 # index maintenance (rarely needed — sync is automatic)
@@ -71,10 +71,14 @@ records (`mode`, `last-prompt`, `file-history-*`, hook attachments) are skipped.
 
 **Prose vs content.** Each message is indexed twice: `content` (everything,
 including tool arguments and command output) and `prose` (only what was
-actually said). `--prose` searches the second — without it, a query like
-"caddy proxy" is dominated by `[tool: Edit] {...}` messages whose arguments
-happen to contain the words. Use `--prose` for "what did we decide", and plain
-search when hunting a command, path, or piece of output.
+actually said). **Queries read prose by default** — matching, previews and
+`--full` all use it, and messages that only made a tool call drop out
+entirely. Without this a query like "caddy proxy" is dominated by
+`[tool: Edit] {...}` messages whose arguments happen to contain the words.
+
+`--all` switches to the full content, which is what you want when hunting a
+command, a path, an error string, or something that only ever appeared in
+command output.
 
 **Recaps.** An assistant message whose *prose* mentions "recap" is flagged
 `isRecap`. Tool-call arguments are deliberately excluded — otherwise running

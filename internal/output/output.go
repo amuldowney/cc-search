@@ -33,6 +33,9 @@ type Options struct {
 	PreviewLength int
 	Full          bool
 	Truncated     bool
+	// UseProse renders each result from what was said rather than from the
+	// full message, which also contains tool calls and their output.
+	UseProse bool
 }
 
 // DefaultPreviewLength is the preview size when none is requested.
@@ -47,17 +50,21 @@ func Format(msgs []transcript.Message, opts Options) Response {
 
 	resp := Response{Results: []Result{}, Truncated: opts.Truncated}
 	for _, m := range msgs {
+		body, chars := m.Content, m.CharCount
+		if opts.UseProse {
+			body, chars = m.Prose, len(m.Prose)
+		}
 		r := Result{
 			ID:        m.ID,
 			SessionID: m.SessionID,
 			Timestamp: time.UnixMilli(m.Timestamp).UTC().Format(time.RFC3339),
 			Type:      m.Type,
 			IsRecap:   m.IsRecap,
-			Preview:   preview(m.Content, length),
-			CharCount: m.CharCount,
+			Preview:   preview(body, length),
+			CharCount: chars,
 		}
 		if opts.Full {
-			r.Content = m.Content
+			r.Content = body
 		}
 		resp.Results = append(resp.Results, r)
 		if m.IsRecap {

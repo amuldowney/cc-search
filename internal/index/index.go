@@ -85,6 +85,7 @@ type LastOptions struct {
 	Hours     int
 	SessionID string
 	Type      string
+	ProseOnly bool
 }
 
 // SearchOptions selects messages matching a full-text query.
@@ -291,7 +292,7 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	return count, nil
 }
 
-const selectColumns = `id, sessionId, timestamp, type, content, charCount, isRecap`
+const selectColumns = `id, sessionId, timestamp, type, content, prose, charCount, isRecap`
 
 // Last returns the most recent messages, newest first.
 func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
@@ -305,6 +306,9 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 	if opts.Type != "" {
 		query += ` AND type = ?`
 		args = append(args, opts.Type)
+	}
+	if opts.ProseOnly {
+		query += ` AND prose != ''`
 	}
 	if opts.Hours > 0 {
 		query += ` AND timestamp >= ?`
@@ -388,7 +392,7 @@ func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
 	for rows.Next() {
 		var m transcript.Message
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Timestamp, &m.Type,
-			&m.Content, &m.CharCount, &m.IsRecap); err != nil {
+			&m.Content, &m.Prose, &m.CharCount, &m.IsRecap); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)

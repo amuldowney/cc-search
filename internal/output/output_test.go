@@ -105,6 +105,36 @@ func TestFormatOmitsContentUnlessFull(t *testing.T) {
 	}
 }
 
+func TestFormatUseProseRendersProsePreview(t *testing.T) {
+	msgs := []transcript.Message{{
+		Content:   `[tool: Bash] {"command":"ls"}` + "\n" + "here is the listing",
+		Prose:     "here is the listing",
+		CharCount: 48,
+	}}
+
+	got := Format(msgs, Options{UseProse: true})
+
+	if got.Results[0].Preview != "here is the listing" {
+		t.Errorf("Preview = %q, want the prose", got.Results[0].Preview)
+	}
+	if got.Results[0].CharCount != len("here is the listing") {
+		t.Errorf("CharCount = %d, want the prose length", got.Results[0].CharCount)
+	}
+}
+
+func TestFormatUseProseWithFullEmitsProse(t *testing.T) {
+	msgs := []transcript.Message{{
+		Content: "everything including tools",
+		Prose:   "just the words",
+	}}
+
+	got := Format(msgs, Options{UseProse: true, Full: true})
+
+	if got.Results[0].Content != "just the words" {
+		t.Errorf("Content = %q, want the prose under --full", got.Results[0].Content)
+	}
+}
+
 func TestFormatCountsOnlyRecaps(t *testing.T) {
 	got := Format([]transcript.Message{
 		{Content: "one", IsRecap: true},

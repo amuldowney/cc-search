@@ -287,6 +287,41 @@ func TestOpenDiscardsIndexBuiltByAnOlderSchema(t *testing.T) {
 	}
 }
 
+func TestLastProseOnlySkipsMessagesWithoutProse(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	writeRawTranscript(t, dir, "session-a", []string{
+		fmt.Sprintf(`{"type":"assistant","uuid":"l1","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`, ts),
+		fmt.Sprintf(`{"type":"assistant","uuid":"l2","sessionId":"session-a","timestamp":%q,`+
+			`"message":{"content":[{"type":"text","text":"here is the listing"}]}}`, ts),
+	})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := db.Last(LastOptions{N: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unfiltered Last got %d messages, want 2", len(all))
+	}
+
+	got, err := db.Last(LastOptions{N: 10, ProseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "l2" {
+		t.Fatalf("got %+v, want only the message that says something", got)
+	}
+}
+
 func TestSearchProseOnlyIgnoresToolArguments(t *testing.T) {
 	dir := t.TempDir()
 	ts := time.Now().UTC().Format(time.RFC3339Nano)

@@ -42,10 +42,11 @@ search options:
   --session ID          restrict to one session
   --type TYPE           restrict to user, assistant, system, ...
   --prefer-recaps       sort recap messages first
-  --prose               match only spoken text, not tool arguments or output
   --recaps-only         return only recap messages
 
 output options (last and search):
+  --all                 include tool calls and their output (default: only
+                        what was actually said)
   --preview-length N    preview size in characters (default 100)
   --full                include the complete message content
   --index PATH          index database to use
@@ -116,6 +117,7 @@ type commonFlags struct {
 	session       string
 	previewLength int
 	full          bool
+	all           bool
 	indexPath     string
 	transcriptDir string
 }
@@ -129,6 +131,7 @@ func newFlagSet(name string, stderr io.Writer) *commonFlags {
 	set.BoolVar(&f.full, "full", false, "include the complete message content")
 	set.StringVar(&f.indexPath, "index", "", "index database to use")
 	set.StringVar(&f.transcriptDir, "transcripts", "", "transcript directory to index")
+	set.BoolVar(&f.all, "all", false, "include tool calls and their output")
 	return f
 }
 
@@ -148,6 +151,7 @@ func (f *commonFlags) outputOptions(truncated bool) output.Options {
 		PreviewLength: f.previewLength,
 		Full:          f.full,
 		Truncated:     truncated,
+		UseProse:      !f.all,
 	}
 }
 
@@ -200,7 +204,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	defer db.Close()
 
 	msgs, err := db.Last(index.LastOptions{
-		N: count, Hours: *hours, SessionID: f.session, Type: *msgType})
+		N: count, Hours: *hours, SessionID: f.session, Type: *msgType, ProseOnly: !f.all})
 	if err != nil {
 		return err
 	}
@@ -214,7 +218,6 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	windowHours := f.set.Int("window-hours", 0, "only search the last H hours")
 	msgType := f.set.String("type", "", "restrict to a message type")
 	preferRecaps := f.set.Bool("prefer-recaps", false, "sort recap messages first")
-	prose := f.set.Bool("prose", false, "match only what was said, not tool arguments or output")
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 
 	if len(args) == 0 {
@@ -255,7 +258,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		SessionID:      f.session,
 		Type:           *msgType,
 		PreferRecaps:   *preferRecaps,
-		ProseOnly:      *prose,
+		ProseOnly:      !f.all,
 		RecapsOnly:     *recapsOnly,
 	})
 	if err != nil {
