@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -290,6 +291,71 @@ func TestOpenRebuildsCorruptIndex(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d messages, want 1", len(got))
+	}
+}
+
+func TestOpenPreservesIndexOnTransientBusyError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locker, err := sql.Open("sqlite3", path+"?_busy_timeout=100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	if _, err := locker.Exec(`BEGIN EXCLUSIVE`); err != nil {
+		locker.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = locker.Exec(`ROLLBACK`)
+		_ = locker.Close()
+	})
+
+	if reopened, err := Open(path); err == nil {
+		_ = reopened.Close()
+		t.Fatal("Open succeeded while another process held an exclusive lock")
+	} else if !strings.Contains(strings.ToLower(err.Error()), "locked") &&
+		!strings.Contains(strings.ToLower(err.Error()), "busy") {
+		t.Fatalf("Open returned unrelated error for a locked index: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("Open replaced the existing index after a transient lock error")
+	}
+}
+
+func TestLifecycleLockTimeoutNamesIndexAndWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	held, err := acquireLifecycleLockWithTimeout(path, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	started := time.Now()
+	_, err = acquireLifecycleLockWithTimeout(path, time.Millisecond)
+	if err == nil {
+		t.Fatal("acquireLifecycleLock succeeded while the index lock was held")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("lock timeout took %s, want a bounded wait", elapsed)
+	}
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "1ms") {
+		t.Fatalf("lock timeout error = %q, want index path and wait duration", err)
 	}
 }
 

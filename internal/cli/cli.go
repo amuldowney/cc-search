@@ -205,6 +205,10 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 			}
 		}
 	}
+	if err := db.ReleaseLifecycleLock(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -376,6 +380,9 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 		}
 		stats.SessionsIndexed += s.SessionsIndexed
 		stats.MessagesIndexed += s.MessagesIndexed
+	}
+	if err := db.ReleaseLifecycleLock(); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "indexed %d messages from %d sessions\n",
 		stats.MessagesIndexed, stats.SessionsIndexed)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -364,6 +365,114 @@ func TestSessionFlagFiltersResults(t *testing.T) {
 
 	if resp.Total != 1 || resp.Results[0].Preview != "from b" {
 		t.Errorf("results = %+v, want only session-b", resp.Results)
+	}
+}
+
+func TestConcurrentCLIProcessesWorker(t *testing.T) {
+	if os.Getenv("CC_SEARCH_CONCURRENT_WORKER") != "1" {
+		return
+	}
+
+	ready := filepath.Join(os.Getenv("CC_SEARCH_CONCURRENT_READY_DIR"), fmt.Sprint(os.Getpid()))
+	if err := os.WriteFile(ready, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(os.Getenv("CC_SEARCH_CONCURRENT_RELEASE")); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"search", "needle",
+		"--index", os.Getenv("CC_SEARCH_CONCURRENT_INDEX"),
+		"--transcripts", os.Getenv("CC_SEARCH_CONCURRENT_TRANSCRIPTS"),
+	}, Config{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("CLI exited %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response output.Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("CLI returned invalid JSON: %v: %q", err, stdout.String())
+	}
+	if response.Total != 1 {
+		t.Fatalf("CLI returned %d results, want 1", response.Total)
+	}
+}
+
+func TestConcurrentCLIProcesses(t *testing.T) {
+	root := t.TempDir()
+	transcripts := filepath.Join(root, "transcripts")
+	if err := os.Mkdir(transcripts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var transcript strings.Builder
+	for i := 0; i < 10000; i++ {
+		content := "filler"
+		if i == 0 {
+			content = "needle"
+		}
+		fmt.Fprintf(&transcript,
+			`{"type":"user","uuid":"message-%d","sessionId":"session-a","timestamp":"2026-08-05T00:00:00Z","message":{"content":%q}}`+"\n", i, content)
+	}
+	if err := os.WriteFile(filepath.Join(transcripts, "session-a.jsonl"), []byte(transcript.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(root, "shared", "index.db")
+	readyDir := filepath.Join(root, "ready")
+	if err := os.Mkdir(readyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	release := filepath.Join(root, "release")
+
+	const processCount = 11
+	commands := make([]*exec.Cmd, processCount)
+	outputs := make([]struct {
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	}, processCount)
+	for i := range commands {
+		cmd := exec.Command(os.Args[0], "-test.run=TestConcurrentCLIProcessesWorker", "-test.v")
+		cmd.Env = append(os.Environ(),
+			"CC_SEARCH_CONCURRENT_WORKER=1",
+			"CC_SEARCH_CONCURRENT_READY_DIR="+readyDir,
+			"CC_SEARCH_CONCURRENT_RELEASE="+release,
+			"CC_SEARCH_CONCURRENT_INDEX="+indexPath,
+			"CC_SEARCH_CONCURRENT_TRANSCRIPTS="+transcripts,
+		)
+		cmd.Stdout = &outputs[i].stdout
+		cmd.Stderr = &outputs[i].stderr
+		commands[i] = cmd
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		entries, err := os.ReadDir(readyDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) == processCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d/%d worker processes reached the barrier", len(entries), processCount)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("worker %d failed: %v\nstdout=%s\nstderr=%s", i, err,
+				outputs[i].stdout.String(), outputs[i].stderr.String())
+		}
 	}
 }
 

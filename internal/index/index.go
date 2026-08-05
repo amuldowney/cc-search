@@ -12,9 +12,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 
 	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
@@ -22,6 +23,10 @@ import (
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
 const schemaVersion = 3
+
+const lifecycleLockTimeout = 30 * time.Second
+
+var errSchemaMismatch = errors.New("incompatible index schema")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -78,7 +83,57 @@ CREATE TABLE IF NOT EXISTS files (
 
 // DB is an open index database.
 type DB struct {
-	sql *sql.DB
+	sql       *sql.DB
+	lifecycle *lifecycleLock
+}
+
+type lifecycleLock struct {
+	file *os.File
+}
+
+func acquireLifecycleLock(indexPath string) (*lifecycleLock, error) {
+	return acquireLifecycleLockWithTimeout(indexPath, lifecycleLockTimeout)
+}
+
+func acquireLifecycleLockWithTimeout(indexPath string, timeout time.Duration) (*lifecycleLock, error) {
+	lockPath := indexPath + ".lock"
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lifecycle lock for index %q: %w", indexPath, err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &lifecycleLock{file: file}, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			_ = file.Close()
+			return nil, fmt.Errorf("acquire lifecycle lock for index %q: %w", indexPath, err)
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			_ = file.Close()
+			return nil, fmt.Errorf("timed out waiting %s for index %q lifecycle lock",
+				timeout, indexPath)
+		}
+		if remaining > 25*time.Millisecond {
+			remaining = 25 * time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
+}
+
+func (l *lifecycleLock) Close() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	unlockErr := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	closeErr := l.file.Close()
+	l.file = nil
+	return errors.Join(unlockErr, closeErr)
 }
 
 // SyncStats reports what a Sync changed.
@@ -117,24 +172,66 @@ type SearchOptions struct {
 	RecapsOnly bool
 }
 
-// Open opens (creating if needed) the index at path.
+// Open opens (creating if needed) the index at path and holds the lifecycle
+// lock until ReleaseLifecycleLock or Close is called. Callers should release
+// it after synchronization and before running normal queries.
 func Open(path string) (*DB, error) {
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
 	}
-	db, err := open(path)
-	if err == nil {
-		return db, nil
-	}
-
-	// A damaged or outdated index is disposable — everything in it is derived
-	// from the transcripts, so throw it away and start clean rather than fail.
-	if rmErr := os.Remove(path); rmErr != nil {
+	lifecycle, err := acquireLifecycleLock(path)
+	if err != nil {
 		return nil, err
 	}
-	return open(path)
+	fail := func(err error) (*DB, error) {
+		return nil, errors.Join(err, lifecycle.Close())
+	}
+
+	db, err := open(path)
+	if err == nil {
+		db.lifecycle = lifecycle
+		return db, nil
+	}
+	if !shouldRebuild(err) {
+		return fail(err)
+	}
+
+	if err := removeDatabaseFiles(path); err != nil {
+		return fail(err)
+	}
+	db, err = open(path)
+	if err != nil {
+		return fail(err)
+	}
+	db.lifecycle = lifecycle
+	return db, nil
+}
+
+func removeDatabaseFiles(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("discard index %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func shouldRebuild(err error) bool {
+	if errors.Is(err, errSchemaMismatch) {
+		return true
+	}
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code {
+	case sqlite3.ErrCorrupt, sqlite3.ErrNotADB, sqlite3.ErrFormat:
+		return true
+	default:
+		return false
+	}
 }
 
 func open(path string) (*DB, error) {
@@ -148,9 +245,15 @@ func open(path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("read schema version: %w", err)
 	}
-	if version != schemaVersion && !isEmpty(handle) {
+	empty, err := isEmpty(handle)
+	if err != nil {
 		handle.Close()
-		return nil, fmt.Errorf("index has schema version %d, want %d", version, schemaVersion)
+		return nil, fmt.Errorf("check schema contents: %w", err)
+	}
+	if version != schemaVersion && !empty {
+		handle.Close()
+		return nil, fmt.Errorf("%w: index has schema version %d, want %d",
+			errSchemaMismatch, version, schemaVersion)
 	}
 
 	if _, err := handle.Exec(schema); err != nil {
@@ -170,17 +273,33 @@ func open(path string) (*DB, error) {
 
 // isEmpty reports whether the database has no tables yet, which is how a
 // freshly created file is told apart from one written by another version.
-func isEmpty(handle *sql.DB) bool {
+func isEmpty(handle *sql.DB) (bool, error) {
 	var tables int
 	if err := handle.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table'`).
 		Scan(&tables); err != nil {
-		return false
+		return false, err
 	}
-	return tables == 0
+	return tables == 0, nil
 }
 
-// Close releases the database handle.
-func (d *DB) Close() error { return d.sql.Close() }
+// ReleaseLifecycleLock releases the cross-process lock after synchronization.
+// It is safe to call more than once.
+func (d *DB) ReleaseLifecycleLock() error {
+	if d == nil || d.lifecycle == nil {
+		return nil
+	}
+	err := d.lifecycle.Close()
+	d.lifecycle = nil
+	return err
+}
+
+// Close releases the database handle and any lifecycle lock still held.
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	return errors.Join(d.sql.Close(), d.ReleaseLifecycleLock())
+}
 
 // Sync indexes any transcript file in dir that changed since the last sync.
 func (d *DB) Sync(dir string) (SyncStats, error) {
