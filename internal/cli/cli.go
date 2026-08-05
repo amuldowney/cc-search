@@ -54,6 +54,7 @@ search options:
   --window-messages M   only search the newest M messages
   --window-hours H      only search the last H hours
   --session ID          restrict to one session
+  --include-current     include the current session in search results
   --type TYPE           restrict to user, assistant, system, ...
   --any                 match any term (default: every term must appear)
   --raw                 treat the pattern as an FTS5 boolean expression
@@ -254,6 +255,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 	any := f.set.Bool("any", false, "match any term rather than all of them")
 	raw := f.set.Bool("raw", false, "pass the pattern to FTS5 as a boolean expression")
+	includeCurrent := f.set.Bool("include-current", false, "include the current session in search results")
 
 	if len(args) == 0 {
 		return fmt.Errorf("%w: search needs a pattern", errUsage)
@@ -289,18 +291,23 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 		queryLimit++
 	}
 
+	excludeSession := ""
+	if f.session == "" && !*includeCurrent {
+		excludeSession = currentSessionID()
+	}
 	search := index.SearchOptions{
-		Query:          pattern,
-		Limit:          queryLimit,
-		WindowMessages: *windowMessages,
-		WindowHours:    *windowHours,
-		SessionID:      f.session,
-		Type:           *msgType,
-		PreferRecaps:   *preferRecaps,
-		ProseOnly:      !f.all,
-		RecapsOnly:     *recapsOnly,
-		Any:            *any,
-		Raw:            *raw,
+		Query:            pattern,
+		Limit:            queryLimit,
+		WindowMessages:   *windowMessages,
+		WindowHours:      *windowHours,
+		SessionID:        f.session,
+		ExcludeSessionID: excludeSession,
+		Type:             *msgType,
+		PreferRecaps:     *preferRecaps,
+		ProseOnly:        !f.all,
+		RecapsOnly:       *recapsOnly,
+		Any:              *any,
+		Raw:              *raw,
 	}
 	msgs, err := db.Search(search)
 	if err != nil {
@@ -373,6 +380,24 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "indexed %d messages from %d sessions\n",
 		stats.MessagesIndexed, stats.SessionsIndexed)
 	return nil
+}
+
+// currentSessionID identifies the pi conversation running this command. An
+// unset ID means the caller is not running inside pi (or has not exposed its
+// session), so search keeps its historical all-sessions behaviour.
+func currentSessionID() string {
+	if id := strings.TrimSpace(os.Getenv("PI_SESSION_ID")); id != "" {
+		return id
+	}
+	path := strings.TrimSpace(os.Getenv("PI_SESSION_FILE"))
+	if path == "" {
+		return ""
+	}
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if separator := strings.LastIndex(name, "_"); separator >= 0 {
+		return name[separator+1:]
+	}
+	return name
 }
 
 func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Options) error {

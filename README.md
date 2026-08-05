@@ -37,6 +37,7 @@ cc-search last 30 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47 --type user
 cc-search search "grayscale waveform"
 cc-search search "display.cpp" --limit 5 --window-hours 48
 cc-search search "firmware rollout" --prefer-recaps
+cc-search search "retry loop" --include-current  # include this pi session
 cc-search search "no such module: fts5" --all   # include tool calls + output
 cc-search search "battery dispatch reserve" --any  # any term, not all
 cc-search search '("caddy" OR "pihole") NOT "proxy"' --raw   # boolean logic
@@ -56,6 +57,11 @@ ANDed. When a multi-word query matches nothing, the search retries
 with any term rather than reporting the topic was never discussed, and says so
 with `"relaxed": true` plus a note on stderr — those hits are related, not
 exact. `--any` asks for that behaviour up front.
+
+When running inside pi, `search` excludes the current session by default because
+its contents are already in the caller's context. `--include-current` restores
+it, and an explicit `--session ID` always selects that session. `last` and
+`read` are unchanged, so they can still recover the current conversation.
 
 `--raw` hands the pattern to FTS5 verbatim, so `OR`, `NOT`, `NEAR`, parentheses
 and `"quoted phrases"` all work. Punctuation must then be quoted yourself —

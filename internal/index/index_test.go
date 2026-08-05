@@ -187,6 +187,46 @@ func TestSearchFiltersByType(t *testing.T) {
 	}
 }
 
+func TestSearchExcludesOneSession(t *testing.T) {
+	dir := t.TempDir()
+	writeTranscript(t, dir, "current", []msg{{"user", "needle current", 10}})
+	writeTranscript(t, dir, "history", []msg{{"user", "needle history", 20}})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Search(SearchOptions{Query: "needle", ExcludeSessionID: "current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "history" {
+		t.Fatalf("got %+v, want only the history session", got)
+	}
+}
+
+func TestSearchExplicitSessionOverridesExclusion(t *testing.T) {
+	db, dir := newIndex(t, []msg{{"user", "needle current", 10}})
+	writeTranscript(t, dir, "history", []msg{{"user", "needle history", 20}})
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Search(SearchOptions{
+		Query: "needle", SessionID: "session-a", ExcludeSessionID: "session-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "session-a" {
+		t.Fatalf("got %+v, want the explicitly selected session", got)
+	}
+}
+
 func TestSearchWindowHoursLimitsHistory(t *testing.T) {
 	db, _ := newIndex(t, []msg{
 		{"user", "battery dispatch old", 60 * 5},

@@ -125,6 +125,65 @@ func TestSearchFindsMatch(t *testing.T) {
 	}
 }
 
+func TestSearchExcludesCurrentPiSessionByDefault(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "waveform current", 10}})
+	history := filepath.Join(cfg.TranscriptDirs[0], "history.jsonl")
+	line := fmt.Sprintf(
+		`{"type":"user","uuid":"history-1","sessionId":"history","timestamp":%q,"message":{"content":"waveform history"}}`,
+		time.Now().Add(-20*time.Minute).UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(history, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PI_SESSION_ID", "session-a")
+	resp, stderr, code := run(t, cfg, "search", "waveform")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || resp.Results[0].SessionID != "history" {
+		t.Fatalf("results = %+v, want only the history session", resp.Results)
+	}
+}
+
+func TestSearchIncludesCurrentSessionWhenRequested(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "waveform current", 10}})
+	t.Setenv("PI_SESSION_ID", "session-a")
+
+	resp, stderr, code := run(t, cfg, "search", "waveform", "--include-current")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || resp.Results[0].SessionID != "session-a" {
+		t.Fatalf("results = %+v, want the current session", resp.Results)
+	}
+}
+
+func TestSearchExplicitSessionIncludesCurrentSession(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "waveform current", 10}})
+	t.Setenv("PI_SESSION_ID", "session-a")
+
+	resp, stderr, code := run(t, cfg, "search", "waveform", "--session", "session-a")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 1 || resp.Results[0].SessionID != "session-a" {
+		t.Fatalf("results = %+v, want the explicitly selected current session", resp.Results)
+	}
+}
+
+func TestSearchKeepsAllSessionsOutsidePi(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "waveform current", 10}})
+	t.Setenv("PI_SESSION_ID", "session-a")
+
+	resp, stderr, code := run(t, cfg, "search", "waveform")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if resp.Total != 0 {
+		t.Fatalf("Total = %d, want 0 when no historical session matches", resp.Total)
+	}
+}
+
 func TestSearchTruncatedWhenMoreResultsExist(t *testing.T) {
 	cfg := fixture(t, []msg{
 		{"user", "grayscale one", 30},

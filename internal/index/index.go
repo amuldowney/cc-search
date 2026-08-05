@@ -104,9 +104,11 @@ type SearchOptions struct {
 	WindowMessages int
 	WindowHours    int
 	SessionID      string
-	Type           string
-	PreferRecaps   bool
-	ProseOnly      bool
+	// ExcludeSessionID removes one session unless SessionID explicitly selects it.
+	ExcludeSessionID string
+	Type             string
+	PreferRecaps     bool
+	ProseOnly        bool
 	// Any matches messages containing any term rather than all of them.
 	Any bool
 	// Raw passes Query to FTS5 untouched, so it may use OR, NOT, NEAR,
@@ -368,6 +370,9 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 	if opts.SessionID != "" {
 		window += ` AND sessionId = ?`
 		args = append(args, opts.SessionID)
+	} else if opts.ExcludeSessionID != "" {
+		window += ` AND sessionId != ?`
+		args = append(args, opts.ExcludeSessionID)
 	}
 	if opts.WindowHours > 0 {
 		window += ` AND timestamp >= ?`
