@@ -1,2 +1,3 @@
 cc-search
 *.db
+.worktrees/
