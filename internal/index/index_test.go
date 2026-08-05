@@ -294,6 +294,45 @@ func TestOpenRebuildsCorruptIndex(t *testing.T) {
 	}
 }
 
+func TestRemoveDatabaseFilesLeavesPrimaryWhenSidecarCannotBeRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	if err := os.WriteFile(path, []byte("database"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := path + "-journal"
+	if err := os.Mkdir(sidecar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sidecar, "in-use"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeDatabaseFiles(path); err == nil {
+		t.Fatal("removeDatabaseFiles succeeded despite an undeletable recovery sidecar")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("primary index was removed after sidecar cleanup failed: %v", err)
+	}
+}
+
+func TestRemoveDatabaseFilesRemovesRollbackJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	if err := os.WriteFile(path, []byte("database"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journal := path + "-journal"
+	if err := os.WriteFile(journal, []byte("stale journal"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeDatabaseFiles(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback journal still exists: %v", err)
+	}
+}
+
 func TestOpenPreservesIndexOnTransientBusyError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.db")
 	db, err := Open(path)

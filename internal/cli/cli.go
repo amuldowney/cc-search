@@ -140,6 +140,14 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 // errUsage marks errors caused by how the command was invoked, which exit 2.
 var errUsage = errors.New("usage")
 
+var closeIndex = func(db *index.DB) error {
+	return db.Close()
+}
+
+func closeIndexWithError(db *index.DB, operationErr error) error {
+	return errors.Join(operationErr, closeIndex(db))
+}
+
 // commonFlags are shared by every command that reads or writes the index.
 type commonFlags struct {
 	set           *flag.FlagSet
@@ -200,19 +208,17 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
 			} else {
-				db.Close()
-				return nil, err
+				return nil, closeIndexWithError(db, err)
 			}
 		}
 	}
 	if err := db.ReleaseLifecycleLock(); err != nil {
-		db.Close()
-		return nil, err
+		return nil, closeIndexWithError(db, err)
 	}
 	return db, nil
 }
 
-func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
+func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("last", stderr)
 	hours := f.set.Int("hours", 0, "only messages from the last H hours")
 	msgType := f.set.String("type", "", "restrict to a message type")
@@ -239,7 +245,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	msgs, err := db.Last(index.LastOptions{
 		N: count, Hours: *hours, SessionID: f.session, Type: *msgType, ProseOnly: !f.all})
@@ -249,7 +255,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) error {
 	return emit(stdout, stderr, msgs, f.outputOptions(false))
 }
 
-func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
+func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("search", stderr)
 	limit := f.set.Int("limit", 0, "maximum results returned")
 	windowMessages := f.set.Int("window-messages", 0, "only search the newest M messages")
@@ -286,7 +292,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	// Ask for one more than requested so we can tell whether the limit cut
 	// results off, then drop the extra before rendering.
@@ -349,7 +355,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) error {
 	return emit(stdout, stderr, msgs, opts)
 }
 
-func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
+func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	set := flag.NewFlagSet("rebuild", flag.ContinueOnError)
 	set.SetOutput(stderr)
 	session := set.String("session", "", "rebuild a single session")
@@ -370,7 +376,7 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	var stats index.SyncStats
 	for _, dir := range cfg.TranscriptDirs {
@@ -427,7 +433,7 @@ func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Optio
 	return err
 }
 
-func runRead(args []string, cfg Config, stdout, stderr io.Writer) error {
+func runRead(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("read", stderr)
 	before := f.set.Int("before", defaultReadContext, "messages of context before")
 	after := f.set.Int("after", defaultReadContext, "messages of context after")
@@ -452,7 +458,7 @@ func runRead(args []string, cfg Config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	msgs, err := db.Around(id, *before, *after, !f.all)
 	if err != nil {

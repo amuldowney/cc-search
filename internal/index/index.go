@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
@@ -23,8 +22,6 @@ import (
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
 const schemaVersion = 3
-
-const lifecycleLockTimeout = 30 * time.Second
 
 var errSchemaMismatch = errors.New("incompatible index schema")
 
@@ -85,55 +82,6 @@ CREATE TABLE IF NOT EXISTS files (
 type DB struct {
 	sql       *sql.DB
 	lifecycle *lifecycleLock
-}
-
-type lifecycleLock struct {
-	file *os.File
-}
-
-func acquireLifecycleLock(indexPath string) (*lifecycleLock, error) {
-	return acquireLifecycleLockWithTimeout(indexPath, lifecycleLockTimeout)
-}
-
-func acquireLifecycleLockWithTimeout(indexPath string, timeout time.Duration) (*lifecycleLock, error) {
-	lockPath := indexPath + ".lock"
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lifecycle lock for index %q: %w", indexPath, err)
-	}
-
-	deadline := time.Now().Add(timeout)
-	for {
-		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return &lifecycleLock{file: file}, nil
-		}
-		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
-			_ = file.Close()
-			return nil, fmt.Errorf("acquire lifecycle lock for index %q: %w", indexPath, err)
-		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			_ = file.Close()
-			return nil, fmt.Errorf("timed out waiting %s for index %q lifecycle lock",
-				timeout, indexPath)
-		}
-		if remaining > 25*time.Millisecond {
-			remaining = 25 * time.Millisecond
-		}
-		time.Sleep(remaining)
-	}
-}
-
-func (l *lifecycleLock) Close() error {
-	if l == nil || l.file == nil {
-		return nil
-	}
-	unlockErr := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
-	closeErr := l.file.Close()
-	l.file = nil
-	return errors.Join(unlockErr, closeErr)
 }
 
 // SyncStats reports what a Sync changed.
@@ -210,7 +158,7 @@ func Open(path string) (*DB, error) {
 }
 
 func removeDatabaseFiles(path string) error {
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	for _, suffix := range []string{"-wal", "-shm", "-journal", ""} {
 		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("discard index %q: %w", path, err)
 		}

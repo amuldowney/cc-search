@@ -53,9 +53,11 @@ cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
 
 Concurrent processes using the same index serialize opening and synchronization
 through a path-specific lifecycle lock. Waiting is bounded; a timeout names the
-index and wait duration. Transient SQLite busy/locked errors and environmental
-I/O errors are returned without replacing the existing index; only confirmed
-corruption or an incompatible schema is rebuilt automatically.
+index and wait duration. The lock uses advisory Unix file locking and is
+supported on Unix targets (Linux, macOS, BSD, and illumos); no Windows lock
+backend is provided. Transient SQLite busy/locked errors and
+environmental I/O errors are returned without replacing the existing index; only
+confirmed corruption or an incompatible schema is rebuilt automatically.
 
 Terms are stemmed with porter and prefix matched, so `cache` finds `caching`
 without matching anything inside `display.cpp` or `192.168.1.112`. Terms are

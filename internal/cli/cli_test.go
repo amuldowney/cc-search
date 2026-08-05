@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andrewmuldowney/cc-search/internal/index"
 	"github.com/andrewmuldowney/cc-search/internal/output"
 )
 
@@ -368,6 +370,71 @@ func TestSessionFlagFiltersResults(t *testing.T) {
 	}
 }
 
+func TestOpenIndexJoinsSyncAndCloseErrors(t *testing.T) {
+	root := t.TempDir()
+	transcripts := filepath.Join(root, "transcripts")
+	if err := os.Mkdir(transcripts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcripts, "oversized.jsonl"),
+		[]byte(strings.Repeat("x", 16*1024*1024+1)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	closeErr := errors.New("release lifecycle lock: injected test failure")
+	previous := closeIndex
+	closeIndex = func(db *index.DB) error {
+		return errors.Join(db.Close(), closeErr)
+	}
+	t.Cleanup(func() { closeIndex = previous })
+
+	_, err := openIndex(Config{
+		IndexPath: filepath.Join(root, "index.db"), TranscriptDirs: []string{transcripts},
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("openIndex succeeded despite an oversized transcript")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("openIndex error = %v, want release error too", err)
+	}
+	if !strings.Contains(err.Error(), "token too long") {
+		t.Fatalf("openIndex error = %v, want sync error too", err)
+	}
+}
+
+func TestRunRebuildJoinsRebuildAndCloseErrors(t *testing.T) {
+	root := t.TempDir()
+	transcripts := filepath.Join(root, "transcripts")
+	if err := os.Mkdir(transcripts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcripts, "oversized.jsonl"),
+		[]byte(strings.Repeat("x", 16*1024*1024+1)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	closeErr := errors.New("release lifecycle lock: injected test failure")
+	previous := closeIndex
+	closeIndex = func(db *index.DB) error {
+		return errors.Join(db.Close(), closeErr)
+	}
+	t.Cleanup(func() { closeIndex = previous })
+
+	var stdout, stderr bytes.Buffer
+	err := runRebuild([]string{
+		"--index", filepath.Join(root, "index.db"), "--transcripts", transcripts,
+	}, Config{}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runRebuild succeeded despite an oversized transcript")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("runRebuild error = %v, want release error too", err)
+	}
+	if !strings.Contains(err.Error(), "token too long") {
+		t.Fatalf("runRebuild error = %v, want rebuild error too", err)
+	}
+}
+
 func TestConcurrentCLIProcessesWorker(t *testing.T) {
 	if os.Getenv("CC_SEARCH_CONCURRENT_WORKER") != "1" {
 		return
@@ -404,6 +471,28 @@ func TestConcurrentCLIProcessesWorker(t *testing.T) {
 	}
 }
 
+func waitConcurrentWorker(cmd *exec.Cmd, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case err := <-done:
+			return fmt.Errorf("worker exceeded %s and was killed: %w", timeout, err)
+		case <-time.After(time.Second):
+			return fmt.Errorf("worker exceeded %s and did not exit after being killed", timeout)
+		}
+	}
+}
+
 func TestConcurrentCLIProcesses(t *testing.T) {
 	root := t.TempDir()
 	transcripts := filepath.Join(root, "transcripts")
@@ -431,10 +520,27 @@ func TestConcurrentCLIProcesses(t *testing.T) {
 
 	const processCount = 11
 	commands := make([]*exec.Cmd, processCount)
+	started := make([]bool, processCount)
+	waited := make([]bool, processCount)
 	outputs := make([]struct {
 		stdout bytes.Buffer
 		stderr bytes.Buffer
 	}, processCount)
+	t.Cleanup(func() {
+		if err := os.WriteFile(release, nil, 0o644); err != nil {
+			for i, cmd := range commands {
+				if started[i] && cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}
+		}
+		for i, cmd := range commands {
+			if started[i] && !waited[i] {
+				_ = waitConcurrentWorker(cmd, 2*time.Second)
+				waited[i] = true
+			}
+		}
+	})
 	for i := range commands {
 		cmd := exec.Command(os.Args[0], "-test.run=TestConcurrentCLIProcessesWorker", "-test.v")
 		cmd.Env = append(os.Environ(),
@@ -450,6 +556,7 @@ func TestConcurrentCLIProcesses(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+		started[i] = true
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -469,7 +576,9 @@ func TestConcurrentCLIProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, cmd := range commands {
-		if err := cmd.Wait(); err != nil {
+		err := waitConcurrentWorker(cmd, 15*time.Second)
+		waited[i] = true
+		if err != nil {
 			t.Errorf("worker %d failed: %v\nstdout=%s\nstderr=%s", i, err,
 				outputs[i].stdout.String(), outputs[i].stderr.String())
 		}
