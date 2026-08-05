@@ -1,5 +1,5 @@
-// Package transcript parses Claude Code JSONL transcript files into indexable
-// messages.
+// Package transcript parses Claude Code and pi JSONL transcript files into
+// indexable messages.
 package transcript
 
 import (
@@ -23,36 +23,71 @@ type Message struct {
 // record mirrors the subset of a transcript line we care about. Records that
 // carry no message (mode, last-prompt, file-history-*, ...) simply leave the
 // fields empty and get skipped.
+//
+// Two schemas are recognised:
+//   - Claude Code: {"uuid": ..., "sessionId": ..., "type": "user"|"assistant", ...}
+//   - pi: {"id": ..., "type": "message", "message": {"role": ..., "content": ...}}
+//     plus a {"type": "session", "id": ...} header line naming the session.
 type record struct {
 	UUID      string          `json:"uuid"`
+	ID        string          `json:"id"` // pi records
 	SessionID string          `json:"sessionId"`
 	Timestamp string          `json:"timestamp"`
 	Type      string          `json:"type"`
 	Content   json.RawMessage `json:"content"` // system records
 	Message   *struct {
+		Role    string          `json:"role"` // pi records
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
 }
 
 // block is one element of a structured content array.
 type block struct {
-	Type     string          `json:"type"`
-	Text     string          `json:"text"`
-	Thinking string          `json:"thinking"`
-	Name     string          `json:"name"`
-	Input    json.RawMessage `json:"input"`
-	Content  json.RawMessage `json:"content"` // tool_result payload
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	Arguments json.RawMessage `json:"arguments"` // pi toolCall payload
+	Content   json.RawMessage `json:"content"`   // tool_result payload
+}
+
+// Parser extracts Messages from the lines of one transcript file. It is
+// stateful because pi transcripts declare their session id once, in a header
+// line, rather than on every record.
+type Parser struct {
+	sessionID string
 }
 
 // ParseLine extracts a Message from a single JSONL line. It returns ok=false
 // for lines that carry no indexable message (metadata records, blank lines,
-// corrupt JSON).
+// corrupt JSON). It is shorthand for a fresh Parser, so pi session-header
+// lines only take effect when one Parser sees a whole file in order.
 func ParseLine(line []byte) (Message, bool) {
+	return new(Parser).ParseLine(line)
+}
+
+// ParseLine extracts a Message from one line, remembering any pi session
+// header seen so far.
+func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	var rec record
 	if err := json.Unmarshal(line, &rec); err != nil {
 		return Message{}, false
 	}
-	if rec.UUID == "" || rec.Timestamp == "" {
+
+	// A pi session header names the session every following line belongs to.
+	if rec.Type == "session" {
+		if rec.ID != "" {
+			p.sessionID = rec.ID
+		}
+		return Message{}, false
+	}
+
+	id := rec.UUID
+	if id == "" {
+		id = rec.ID
+	}
+	if id == "" || rec.Timestamp == "" {
 		return Message{}, false
 	}
 
@@ -61,9 +96,13 @@ func ParseLine(line []byte) (Message, bool) {
 		return Message{}, false
 	}
 
+	typ := rec.Type
 	raw := rec.Content
 	if rec.Message != nil {
 		raw = rec.Message.Content
+		if rec.Type == "message" { // pi: the role carries the message type
+			typ = rec.Message.Role
+		}
 	}
 	content := extractContent(raw)
 	if content == "" {
@@ -71,16 +110,27 @@ func ParseLine(line []byte) (Message, bool) {
 	}
 
 	prose := strings.TrimSpace(spokenText(raw))
+	if typ == "toolResult" {
+		// pi tool results are text blocks, which spokenText would otherwise
+		// mistake for something said aloud. They are tool output: searchable
+		// with --all, hidden from the default prose view.
+		prose = ""
+	}
+
+	sessionID := rec.SessionID
+	if sessionID == "" {
+		sessionID = p.sessionID
+	}
 
 	// A recap is something the assistant *said*, so only its prose counts —
 	// a tool call whose arguments mention recaps is not one.
-	isRecap := rec.Type == "assistant" && strings.Contains(strings.ToLower(prose), "recap")
+	isRecap := typ == "assistant" && strings.Contains(strings.ToLower(prose), "recap")
 
 	return Message{
-		ID:        rec.UUID,
-		SessionID: rec.SessionID,
+		ID:        id,
+		SessionID: sessionID,
 		Timestamp: ts.UnixMilli(),
-		Type:      rec.Type,
+		Type:      typ,
 		Content:   content,
 		Prose:     prose,
 		CharCount: len(content),
@@ -147,6 +197,11 @@ func renderBlock(b block) string {
 			return "[tool: " + b.Name + "]"
 		}
 		return "[tool: " + b.Name + "] " + string(b.Input)
+	case "toolCall": // pi
+		if len(b.Arguments) == 0 {
+			return "[tool: " + b.Name + "]"
+		}
+		return "[tool: " + b.Name + "] " + string(b.Arguments)
 	case "tool_result":
 		return extractContent(b.Content)
 	default:

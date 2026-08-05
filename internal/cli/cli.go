@@ -18,8 +18,13 @@ import (
 	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
 
-// DefaultTranscriptDir is where Claude Code keeps this project's transcripts.
-const DefaultTranscriptDir = ".claude/projects/-home-andrew-Projects"
+// DefaultTranscriptDir is where Claude Code keeps transcripts, one folder per
+// project. It is walked recursively, so every project is indexed.
+const DefaultTranscriptDir = ".claude/projects"
+
+// DefaultPiSessionsDir is where pi keeps session transcripts, one folder per
+// working directory. It is indexed alongside the Claude Code transcripts.
+const DefaultPiSessionsDir = ".pi/agent/sessions"
 
 // DefaultIndexPath is where the search index lives.
 const DefaultIndexPath = ".claude/search-index.db"
@@ -74,8 +79,8 @@ output options (last, search and read):
 // Config supplies the paths the commands operate on. Empty fields fall back to
 // the user's default locations.
 type Config struct {
-	IndexPath     string
-	TranscriptDir string
+	IndexPath      string
+	TranscriptDirs []string
 }
 
 func (c Config) withDefaults() Config {
@@ -86,8 +91,11 @@ func (c Config) withDefaults() Config {
 	if c.IndexPath == "" {
 		c.IndexPath = filepath.Join(home, DefaultIndexPath)
 	}
-	if c.TranscriptDir == "" {
-		c.TranscriptDir = filepath.Join(home, DefaultTranscriptDir)
+	if len(c.TranscriptDirs) == 0 {
+		c.TranscriptDirs = []string{
+			filepath.Join(home, DefaultTranscriptDir),
+			filepath.Join(home, DefaultPiSessionsDir),
+		}
 	}
 	return c
 }
@@ -163,7 +171,7 @@ func (f *commonFlags) resolve(cfg Config) Config {
 		cfg.IndexPath = f.indexPath
 	}
 	if f.transcriptDir != "" {
-		cfg.TranscriptDir = f.transcriptDir
+		cfg.TranscriptDirs = []string{f.transcriptDir}
 	}
 	return cfg.withDefaults()
 }
@@ -186,12 +194,14 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Sync(cfg.TranscriptDir); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
-		} else {
-			db.Close()
-			return nil, err
+	for _, dir := range cfg.TranscriptDirs {
+		if _, err := db.Sync(dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
+			} else {
+				db.Close()
+				return nil, err
+			}
 		}
 	}
 	return db, nil
@@ -341,7 +351,7 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 		cfg.IndexPath = *indexPath
 	}
 	if *transcriptDir != "" {
-		cfg.TranscriptDir = *transcriptDir
+		cfg.TranscriptDirs = []string{*transcriptDir}
 	}
 	cfg = cfg.withDefaults()
 
@@ -351,9 +361,14 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) error {
 	}
 	defer db.Close()
 
-	stats, err := db.Rebuild(cfg.TranscriptDir, *session)
-	if err != nil {
-		return err
+	var stats index.SyncStats
+	for _, dir := range cfg.TranscriptDirs {
+		s, err := db.Rebuild(dir, *session)
+		if err != nil {
+			return err
+		}
+		stats.SessionsIndexed += s.SessionsIndexed
+		stats.MessagesIndexed += s.MessagesIndexed
 	}
 	fmt.Fprintf(stdout, "indexed %d messages from %d sessions\n",
 		stats.MessagesIndexed, stats.SessionsIndexed)

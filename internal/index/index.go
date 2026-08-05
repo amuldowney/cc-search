@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -193,37 +194,47 @@ func (d *DB) Rebuild(dir, sessionID string) (SyncStats, error) {
 func (d *DB) sync(dir, sessionID string, force bool) (SyncStats, error) {
 	var stats SyncStats
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return stats, fmt.Errorf("read transcript dir: %w", err)
-	}
-
-	for _, entry := range entries {
+	// Walk recursively: pi keeps transcripts one level down, in per-directory
+	// folders under its sessions root.
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
-			continue
+			return nil
 		}
 		session := strings.TrimSuffix(entry.Name(), ".jsonl")
-		if sessionID != "" && session != sessionID {
-			continue
+		if sessionID != "" && !sessionMatches(session, sessionID) {
+			return nil
 		}
-		path := filepath.Join(dir, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
 			// The file vanished between listing and stat; nothing to index.
-			continue
+			return nil
 		}
 		if !force && !d.changed(path, info) {
 			stats.FilesSkipped++
-			continue
+			return nil
 		}
 		n, err := d.indexFile(path, session, info)
 		if err != nil {
-			return stats, err
+			return err
 		}
 		stats.SessionsIndexed++
 		stats.MessagesIndexed += n
+		return nil
+	})
+	if err != nil {
+		return stats, fmt.Errorf("read transcript dir: %w", err)
 	}
 	return stats, nil
+}
+
+// sessionMatches reports whether a filename-derived session name is the one
+// asked for. pi filenames are <timestamp>_<uuid>, so also accept a match
+// against the uuid suffix.
+func sessionMatches(session, sessionID string) bool {
+	return session == sessionID || strings.HasSuffix(session, "_"+sessionID)
 }
 
 // changed reports whether path differs from what the files table recorded.
@@ -273,9 +284,10 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	parser := new(transcript.Parser)
 	count := 0
 	for scanner.Scan() {
-		msg, ok := transcript.ParseLine(scanner.Bytes())
+		msg, ok := parser.ParseLine(scanner.Bytes())
 		if !ok {
 			continue
 		}

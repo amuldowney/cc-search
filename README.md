@@ -1,8 +1,12 @@
 # cc-search
 
-A fast local CLI for searching Claude Code conversation transcripts. Built for
-agents to pad context, refresh session memory, and dig up concepts from earlier
-conversations without re-reading whole transcripts.
+A fast local CLI for searching Claude Code and pi conversation transcripts.
+Built for agents to pad context, refresh session memory, and dig up concepts
+from earlier conversations without re-reading whole transcripts.
+
+Both transcript stores are indexed by default: `~/.claude/projects` and
+`~/.pi/agent/sessions`, each walked recursively so every project is covered.
+`--transcripts DIR` overrides both with a single root.
 
 Design: [docs/2026-07-22-transcript-search-design.md](docs/2026-07-22-transcript-search-design.md).
 

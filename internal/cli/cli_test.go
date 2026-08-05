@@ -33,8 +33,8 @@ func fixture(t *testing.T, msgs []msg) Config {
 		t.Fatal(err)
 	}
 	return Config{
-		IndexPath:     filepath.Join(t.TempDir(), "index.db"),
-		TranscriptDir: dir,
+		IndexPath:      filepath.Join(t.TempDir(), "index.db"),
+		TranscriptDirs: []string{dir},
 	}
 }
 
@@ -184,7 +184,7 @@ func toolAndProseFixture(t *testing.T) Config {
 	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDirs: []string{dir}}
 }
 
 func TestSearchIgnoresToolCallsByDefault(t *testing.T) {
@@ -248,7 +248,7 @@ func TestPreviewShowsProseNotToolCallByDefault(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+	cfg := Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDirs: []string{dir}}
 
 	resp, _, _ := run(t, cfg, "last", "1")
 
@@ -293,7 +293,7 @@ func TestPreviewLengthFlag(t *testing.T) {
 
 func TestSessionFlagFiltersResults(t *testing.T) {
 	cfg := fixture(t, []msg{{"user", "from a", 10}})
-	other := filepath.Join(cfg.TranscriptDir, "session-b.jsonl")
+	other := filepath.Join(cfg.TranscriptDirs[0], "session-b.jsonl")
 	line := fmt.Sprintf(
 		`{"type":"user","uuid":"b-1","sessionId":"session-b","timestamp":%q,"message":{"content":"from b"}}`,
 		time.Now().UTC().Format(time.RFC3339Nano))
@@ -328,7 +328,7 @@ func TestIndexPersistsBetweenInvocations(t *testing.T) {
 	if _, _, code := run(t, cfg, "last", "1"); code != 0 {
 		t.Fatal("first invocation failed")
 	}
-	if err := os.RemoveAll(cfg.TranscriptDir); err != nil {
+	if err := os.RemoveAll(cfg.TranscriptDirs[0]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -457,8 +457,8 @@ func TestSearchRequiresPattern(t *testing.T) {
 
 func TestMissingTranscriptDirIsNotFatal(t *testing.T) {
 	cfg := Config{
-		IndexPath:     filepath.Join(t.TempDir(), "index.db"),
-		TranscriptDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		IndexPath:      filepath.Join(t.TempDir(), "index.db"),
+		TranscriptDirs: []string{filepath.Join(t.TempDir(), "does-not-exist")},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -487,7 +487,7 @@ func conversation(t *testing.T, n int) Config {
 	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDir: dir}
+	return Config{IndexPath: filepath.Join(t.TempDir(), "index.db"), TranscriptDirs: []string{dir}}
 }
 
 func TestReadReturnsMessageWithSurroundingContext(t *testing.T) {

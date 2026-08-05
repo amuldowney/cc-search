@@ -860,3 +860,75 @@ func TestSearchRawStillHonoursProseOnly(t *testing.T) {
 		t.Errorf("got %v, want the tool-argument match still excluded", contents(got))
 	}
 }
+
+// writePiTranscript writes a pi-style transcript in a nested per-directory
+// folder: a session header line followed by role-tagged message records.
+func writePiTranscript(t *testing.T, root, folder, filename, sessionID string, lines []string) string {
+	t.Helper()
+	dir := filepath.Join(root, folder)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := fmt.Sprintf(`{"type":"session","version":3,"id":%q,"timestamp":"2026-07-31T23:34:07.731Z","cwd":"/work"}`, sessionID)
+	body := header + "\n" + strings.Join(lines, "\n") + "\n"
+	path := filepath.Join(dir, filename+".jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestSyncIndexesNestedPiTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	writePiTranscript(t, dir, "--home-andrew-Projects--", "2026-07-31T23-34-07-731Z_019fba87",
+		"019fba87", []string{
+			`{"type":"message","id":"m1","timestamp":"2026-07-31T23:34:18.152Z","message":{"role":"user","content":[{"type":"text","text":"fix the hub retry loop"}]}}`,
+			`{"type":"message","id":"m2","timestamp":"2026-07-31T23:34:19.197Z","message":{"role":"assistant","content":[{"type":"text","text":"retry loop fixed"}]}}`,
+		})
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	stats, err := db.Sync(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SessionsIndexed != 1 {
+		t.Fatalf("SessionsIndexed = %d, want 1", stats.SessionsIndexed)
+	}
+
+	got, err := db.Search(SearchOptions{Query: "retry loop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Search returned %d messages, want 2", len(got))
+	}
+	if got[0].SessionID != "019fba87" {
+		t.Errorf("SessionID = %q, want the id from the pi session header", got[0].SessionID)
+	}
+}
+
+func TestRebuildMatchesPiSessionByUUIDSuffix(t *testing.T) {
+	dir := t.TempDir()
+	writePiTranscript(t, dir, "nested", "2026-07-31T23-34-07-731Z_019fba87",
+		"019fba87", []string{
+			`{"type":"message","id":"m1","timestamp":"2026-07-31T23:34:18.152Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}`,
+		})
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	stats, err := db.Rebuild(dir, "019fba87")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SessionsIndexed != 1 {
+		t.Errorf("SessionsIndexed = %d, want 1 (uuid suffix of the pi filename)", stats.SessionsIndexed)
+	}
+}

@@ -221,3 +221,102 @@ func TestParseLineDoesNotFlagUserRecap(t *testing.T) {
 		t.Error("IsRecap = true, want false for user messages")
 	}
 }
+
+func TestParseLineParsesPiUserMessage(t *testing.T) {
+	line := []byte(`{"type":"message","id":"f85d4231","parentId":"cf9b145e",
+		"timestamp":"2026-07-31T23:34:18.152Z",
+		"message":{"role":"user","content":[{"type":"text","text":"fix the hub retry loop"}]}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.ID != "f85d4231" {
+		t.Errorf("ID = %q, want %q", msg.ID, "f85d4231")
+	}
+	if msg.Type != "user" {
+		t.Errorf("Type = %q, want %q", msg.Type, "user")
+	}
+	if msg.Content != "fix the hub retry loop" {
+		t.Errorf("Content = %q", msg.Content)
+	}
+	if msg.Prose != "fix the hub retry loop" {
+		t.Errorf("Prose = %q", msg.Prose)
+	}
+}
+
+func TestParserTakesSessionIDFromPiHeader(t *testing.T) {
+	p := new(Parser)
+	header := []byte(`{"type":"session","version":3,"id":"019fba87-2873",
+		"timestamp":"2026-07-31T23:34:07.731Z","cwd":"/home/andrew/Projects/pi-remote"}`)
+	if _, ok := p.ParseLine(header); ok {
+		t.Fatal("session header should not produce a message")
+	}
+
+	line := []byte(`{"type":"message","id":"f85d4231",
+		"timestamp":"2026-07-31T23:34:18.152Z",
+		"message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+	msg, ok := p.ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.SessionID != "019fba87-2873" {
+		t.Errorf("SessionID = %q, want %q", msg.SessionID, "019fba87-2873")
+	}
+}
+
+func TestParseLineRendersPiToolCallBlock(t *testing.T) {
+	line := []byte(`{"type":"message","id":"a1",
+		"timestamp":"2026-07-31T23:34:19.197Z",
+		"message":{"role":"assistant","content":[
+			{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"ls -la"}}]}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	want := `[tool: bash] {"command":"ls -la"}`
+	if msg.Content != want {
+		t.Errorf("Content = %q, want %q", msg.Content, want)
+	}
+	if msg.Prose != "" {
+		t.Errorf("Prose = %q, want empty", msg.Prose)
+	}
+}
+
+func TestParseLineHidesPiToolResultFromProse(t *testing.T) {
+	line := []byte(`{"type":"message","id":"t1",
+		"timestamp":"2026-07-31T23:34:20.000Z",
+		"message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash",
+			"content":[{"type":"text","text":"file.go\nother.go"}]}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if msg.Type != "toolResult" {
+		t.Errorf("Type = %q, want %q", msg.Type, "toolResult")
+	}
+	if msg.Content != "file.go\nother.go" {
+		t.Errorf("Content = %q", msg.Content)
+	}
+	if msg.Prose != "" {
+		t.Errorf("Prose = %q, want empty so --all is required to see it", msg.Prose)
+	}
+}
+
+func TestParseLineSkipsPiMetadataRecords(t *testing.T) {
+	lines := []string{
+		`{"type":"model_change","id":"03ad8c20","timestamp":"2026-07-31T23:34:07.815Z","modelId":"glm-5.2"}`,
+		`{"type":"thinking_level_change","id":"cf9b145e","timestamp":"2026-07-31T23:34:07.815Z","thinkingLevel":"medium"}`,
+	}
+	for _, line := range lines {
+		if _, ok := ParseLine([]byte(line)); ok {
+			t.Errorf("expected %s to be skipped", line)
+		}
+	}
+}
