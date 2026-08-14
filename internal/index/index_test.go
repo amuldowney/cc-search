@@ -65,6 +65,27 @@ func newIndex(t *testing.T, msgs []msg) (*DB, string) {
 	return db, dir
 }
 
+func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
+	db, _ := newIndex(t, []msg{{"assistant", "recap: ordinary text", 10}})
+
+	var version int
+	if err := db.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("schema version = %d, want 4", version)
+	}
+
+	var columns int
+	if err := db.sql.QueryRow(`
+		SELECT count(*) FROM pragma_table_info('messages') WHERE name = 'isRecap'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 {
+		t.Fatalf("messages has %d isRecap columns, want none", columns)
+	}
+}
+
 func TestSyncIndexesMessagesFromTranscripts(t *testing.T) {
 	db, _ := newIndex(t, []msg{
 		{"user", "build the search index", 10},
@@ -408,10 +429,10 @@ func TestOpenDiscardsIndexBuiltByAnOlderSchema(t *testing.T) {
 	if _, err := legacy.Exec(`
 		CREATE TABLE messages (
 		  id TEXT PRIMARY KEY, sessionId TEXT, timestamp INTEGER, type TEXT,
-		  content TEXT, charCount INTEGER, isRecap INTEGER NOT NULL DEFAULT 0);
+		  content TEXT, charCount INTEGER);
 		CREATE VIRTUAL TABLE messages_fts USING fts5(content, content=messages, content_rowid=rowid);
 		CREATE TABLE files (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER);
-		INSERT INTO messages VALUES ('stale', 's0', 0, 'user', 'from the old schema', 19, 0);`); err != nil {
+		INSERT INTO messages VALUES ('stale', 's0', 0, 'user', 'from the old schema', 19);`); err != nil {
 		t.Fatal(err)
 	}
 	legacy.Close()
@@ -519,42 +540,6 @@ func TestSearchProseOnlyMatchesPlainStringContent(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d results, want 1 — plain string content is all prose", len(got))
-	}
-}
-
-func TestSearchRecapsOnlyExcludesNonRecaps(t *testing.T) {
-	db, _ := newIndex(t, []msg{
-		{"assistant", "recap: the firmware rollout is done", 30},
-		{"assistant", "the firmware rollout is done", 20},
-	})
-
-	got, err := db.Search(SearchOptions{Query: "firmware", RecapsOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("got %d results, want 1", len(got))
-	}
-	if !got[0].IsRecap {
-		t.Error("result is not flagged as a recap")
-	}
-}
-
-func TestSearchPreferRecapsBoostsRecapsToTop(t *testing.T) {
-	db, _ := newIndex(t, []msg{
-		{"assistant", "recap: we discussed the caddy proxy at length", 30},
-		{"assistant", "caddy proxy", 20},
-	})
-
-	got, err := db.Search(SearchOptions{Query: "caddy", PreferRecaps: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d results, want 2", len(got))
-	}
-	if !got[0].IsRecap {
-		t.Errorf("first result is not a recap: %q", got[0].Content)
 	}
 }
 

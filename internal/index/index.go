@@ -21,7 +21,7 @@ import (
 
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
-const schemaVersion = 3
+const schemaVersion = 4
 
 var errSchemaMismatch = errors.New("incompatible index schema")
 
@@ -33,8 +33,7 @@ CREATE TABLE IF NOT EXISTS messages (
   type      TEXT,
   content   TEXT,
   prose     TEXT,
-  charCount INTEGER,
-  isRecap   INTEGER NOT NULL DEFAULT 0
+  charCount INTEGER
 );
 
 -- content is everything (tool calls, command output); prose is only what was
@@ -110,14 +109,12 @@ type SearchOptions struct {
 	// ExcludeSessionID removes one session unless SessionID explicitly selects it.
 	ExcludeSessionID string
 	Type             string
-	PreferRecaps     bool
 	ProseOnly        bool
 	// Any matches messages containing any term rather than all of them.
 	Any bool
 	// Raw passes Query to FTS5 untouched, so it may use OR, NOT, NEAR,
 	// grouping and phrases. Punctuation must then be quoted by the caller.
-	Raw        bool
-	RecapsOnly bool
+	Raw bool
 }
 
 // Open opens (creating if needed) the index at path and holds the lifecycle
@@ -336,16 +333,15 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 
 	insert, err := tx.Prepare(`
-		INSERT INTO messages (id, sessionId, timestamp, type, content, prose, charCount, isRecap)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (id, sessionId, timestamp, type, content, prose, charCount)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			sessionId = excluded.sessionId,
 			timestamp = excluded.timestamp,
 			type      = excluded.type,
 			content   = excluded.content,
 			prose     = excluded.prose,
-			charCount = excluded.charCount,
-			isRecap   = excluded.isRecap`)
+			charCount = excluded.charCount`)
 	if err != nil {
 		return 0, err
 	}
@@ -364,7 +360,7 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 			msg.SessionID = session
 		}
 		if _, err := insert.Exec(msg.ID, msg.SessionID, msg.Timestamp, msg.Type,
-			msg.Content, msg.Prose, msg.CharCount, msg.IsRecap); err != nil {
+			msg.Content, msg.Prose, msg.CharCount); err != nil {
 			return 0, err
 		}
 		count++
@@ -386,7 +382,7 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	return count, nil
 }
 
-const selectColumns = `id, sessionId, timestamp, type, content, prose, charCount, isRecap`
+const selectColumns = `id, sessionId, timestamp, type, content, prose, charCount`
 
 // Last returns the most recent messages, newest first.
 func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
@@ -463,15 +459,7 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 		query += ` AND m.type = ?`
 		args = append(args, opts.Type)
 	}
-	if opts.RecapsOnly {
-		query += ` AND m.isRecap = 1`
-	}
-
-	query += ` ORDER BY `
-	if opts.PreferRecaps {
-		query += `m.isRecap DESC, `
-	}
-	query += `bm25(f.messages_fts), m.timestamp DESC`
+	query += ` ORDER BY bm25(f.messages_fts), m.timestamp DESC`
 
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
@@ -497,7 +485,7 @@ func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
 	for rows.Next() {
 		var m transcript.Message
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Timestamp, &m.Type,
-			&m.Content, &m.Prose, &m.CharCount, &m.IsRecap); err != nil {
+			&m.Content, &m.Prose, &m.CharCount); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)

@@ -59,8 +59,6 @@ search options:
   --any                 match any term (default: every term must appear)
   --raw                 treat the pattern as an FTS5 boolean expression
                         (OR, NOT, NEAR, parens, "quoted phrases")
-  --prefer-recaps       sort recap messages first
-  --recaps-only         return only recap messages
 
 read options:
   --before N            messages of context before it (default 5)
@@ -261,8 +259,6 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	windowMessages := f.set.Int("window-messages", 0, "only search the newest M messages")
 	windowHours := f.set.Int("window-hours", 0, "only search the last H hours")
 	msgType := f.set.String("type", "", "restrict to a message type")
-	preferRecaps := f.set.Bool("prefer-recaps", false, "sort recap messages first")
-	recapsOnly := f.set.Bool("recaps-only", false, "return only recap messages")
 	any := f.set.Bool("any", false, "match any term rather than all of them")
 	raw := f.set.Bool("raw", false, "pass the pattern to FTS5 as a boolean expression")
 	includeCurrent := f.set.Bool("include-current", false, "include the current session in search results")
@@ -313,9 +309,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		SessionID:        f.session,
 		ExcludeSessionID: excludeSession,
 		Type:             *msgType,
-		PreferRecaps:     *preferRecaps,
 		ProseOnly:        !f.all,
-		RecapsOnly:       *recapsOnly,
 		Any:              *any,
 		Raw:              *raw,
 	}

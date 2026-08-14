@@ -139,18 +139,16 @@ func TestParseLineSkipsMetadataRecords(t *testing.T) {
 	}
 }
 
-func TestParseLineFlagsAssistantRecap(t *testing.T) {
-	line := []byte(`{"type":"assistant","uuid":"r1","sessionId":"s1",
-		"timestamp":"2026-07-23T03:51:36.301Z",
-		"message":{"content":[{"type":"text","text":"To Recap: we built the index"}]}}`)
+func TestParseLinePreservesRecapTextAsOrdinaryMessage(t *testing.T) {
+	line := []byte(`{"type":"assistant","uuid":"m1","sessionId":"s1",` +
+		`"timestamp":"2026-08-14T00:00:00Z","message":{"content":"recap: the index is healthy"}}`)
 
 	msg, ok := ParseLine(line)
-
 	if !ok {
-		t.Fatal("expected line to parse")
+		t.Fatal("ParseLine returned ok = false")
 	}
-	if !msg.IsRecap {
-		t.Error("IsRecap = false, want true for assistant message containing 'recap'")
+	if msg.Content != "recap: the index is healthy" || msg.Prose != msg.Content {
+		t.Fatalf("message = %+v, want ordinary content and prose", msg)
 	}
 }
 
@@ -187,38 +185,6 @@ func TestParseLineTreatsStringContentAsProse(t *testing.T) {
 	}
 	if msg.Prose != "restart the caddy container" {
 		t.Errorf("Prose = %q", msg.Prose)
-	}
-}
-
-func TestParseLineDoesNotFlagRecapInsideToolBlocks(t *testing.T) {
-	line := []byte(`{"type":"assistant","uuid":"r3","sessionId":"s1",
-		"timestamp":"2026-07-23T03:51:36.301Z",
-		"message":{"content":[
-			{"type":"tool_use","name":"Bash","input":{"command":"cc-search --recaps-only"}},
-			{"type":"text","text":"Here are the results"}]}}`)
-
-	msg, ok := ParseLine(line)
-
-	if !ok {
-		t.Fatal("expected line to parse")
-	}
-	if msg.IsRecap {
-		t.Error("IsRecap = true; a tool call that mentions recaps is not a recap")
-	}
-}
-
-func TestParseLineDoesNotFlagUserRecap(t *testing.T) {
-	line := []byte(`{"type":"user","uuid":"r2","sessionId":"s1",
-		"timestamp":"2026-07-23T03:51:36.301Z",
-		"message":{"content":"give me a recap"}}`)
-
-	msg, ok := ParseLine(line)
-
-	if !ok {
-		t.Fatal("expected line to parse")
-	}
-	if msg.IsRecap {
-		t.Error("IsRecap = true, want false for user messages")
 	}
 }
 

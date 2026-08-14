@@ -16,7 +16,6 @@ type Result struct {
 	SessionID string `json:"sessionId"`
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
-	IsRecap   bool   `json:"isRecap"`
 	Preview   string `json:"preview,omitempty"`
 	Content   string `json:"content,omitempty"`
 	CharCount int    `json:"charCount"`
@@ -24,10 +23,9 @@ type Result struct {
 
 // Response is the top-level JSON document.
 type Response struct {
-	Results    []Result `json:"results"`
-	Total      int      `json:"total"`
-	RecapCount int      `json:"recapCount"`
-	Truncated  bool     `json:"truncated"`
+	Results   []Result `json:"results"`
+	Total     int      `json:"total"`
+	Truncated bool     `json:"truncated"`
 	// Relaxed reports that no message contained every term, so the search fell
 	// back to matching any of them. These are related hits, not exact ones.
 	Relaxed bool   `json:"relaxed"`
@@ -120,7 +118,6 @@ func Format(msgs []transcript.Message, opts Options) Response {
 			SessionID: m.SessionID,
 			Timestamp: time.UnixMilli(m.Timestamp).UTC().Format(time.RFC3339),
 			Type:      m.Type,
-			IsRecap:   m.IsRecap,
 			CharCount: m.CharCount,
 		}
 		if opts.UseProse {
@@ -132,9 +129,6 @@ func Format(msgs []transcript.Message, opts Options) Response {
 			r.Preview = body
 		}
 		resp.Results = append(resp.Results, r)
-		if m.IsRecap {
-			resp.RecapCount++
-		}
 	}
 	resp.Total = len(resp.Results)
 	return resp

@@ -16,7 +16,6 @@ func TestFormatRendersMessageFields(t *testing.T) {
 		Type:      "assistant",
 		Content:   "the index rebuild completed",
 		CharCount: 27,
-		IsRecap:   true,
 	}}
 
 	got := Format(msgs, Options{})
@@ -31,17 +30,11 @@ func TestFormatRendersMessageFields(t *testing.T) {
 	if r.Timestamp != "2026-07-23T23:00:00Z" {
 		t.Errorf("Timestamp = %q, want RFC3339 UTC", r.Timestamp)
 	}
-	if !r.IsRecap {
-		t.Error("IsRecap = false, want true")
-	}
 	if r.CharCount != 27 {
 		t.Errorf("CharCount = %d, want 27", r.CharCount)
 	}
 	if got.Total != 1 {
 		t.Errorf("Total = %d, want 1", got.Total)
-	}
-	if got.RecapCount != 1 {
-		t.Errorf("RecapCount = %d, want 1", got.RecapCount)
 	}
 }
 
@@ -131,6 +124,16 @@ func TestFormatEmitsOnlyOneBodyField(t *testing.T) {
 	}
 }
 
+func TestFormatOmitsRecapFields(t *testing.T) {
+	encoded, err := json.Marshal(Format([]transcript.Message{{Content: "recap text"}}, Options{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"isRecap"`) || strings.Contains(string(encoded), `"recapCount"`) {
+		t.Errorf("response contains removed recap fields: %s", encoded)
+	}
+}
+
 func TestFormatUseProseRendersProsePreview(t *testing.T) {
 	msgs := []transcript.Message{{
 		Content:   `[tool: Bash] {"command":"ls"}` + "\n" + "here is the listing",
@@ -161,29 +164,13 @@ func TestFormatUseProseWithFullEmitsProse(t *testing.T) {
 	}
 }
 
-func TestFormatCountsOnlyRecaps(t *testing.T) {
-	got := Format([]transcript.Message{
-		{Content: "one", IsRecap: true},
-		{Content: "two"},
-		{Content: "three", IsRecap: true},
-	}, Options{})
-
-	if got.Total != 3 {
-		t.Errorf("Total = %d, want 3", got.Total)
-	}
-	if got.RecapCount != 2 {
-		t.Errorf("RecapCount = %d, want 2", got.RecapCount)
-	}
-}
-
 func TestFormatMarshalsEmptyResultsAsArray(t *testing.T) {
 	encoded, err := json.Marshal(Format(nil, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,"relaxed":false,` +
-		`"budget":{"limit":0,"spent":0,"dropped":0,"shrunk":false}}`
+	want := `{"results":[],"total":0,"truncated":false,"relaxed":false,` + `"budget":{"limit":0,"spent":0,"dropped":0,"shrunk":false}}`
 	if string(encoded) != want {
 		t.Errorf("got %s, want %s", encoded, want)
 	}

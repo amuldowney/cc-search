@@ -17,7 +17,6 @@ type Message struct {
 	Content   string
 	Prose     string // just what was said: text blocks, no tool calls or results
 	CharCount int
-	IsRecap   bool
 }
 
 // record mirrors the subset of a transcript line we care about. Records that
@@ -122,10 +121,6 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 		sessionID = p.sessionID
 	}
 
-	// A recap is something the assistant *said*, so only its prose counts —
-	// a tool call whose arguments mention recaps is not one.
-	isRecap := typ == "assistant" && strings.Contains(strings.ToLower(prose), "recap")
-
 	return Message{
 		ID:        id,
 		SessionID: sessionID,
@@ -134,7 +129,6 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 		Content:   content,
 		Prose:     prose,
 		CharCount: len(content),
-		IsRecap:   isRecap,
 	}, true
 }
 

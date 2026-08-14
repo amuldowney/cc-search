@@ -214,22 +214,29 @@ func TestSearchNotTruncatedWhenLimitNotReached(t *testing.T) {
 	}
 }
 
-func TestSearchRecapsOnlyFlag(t *testing.T) {
+func TestSearchTreatsRecapLikeTextNormally(t *testing.T) {
 	cfg := fixture(t, []msg{
-		{"assistant", "recap: the proxy moved to the HP", 30},
-		{"assistant", "the proxy moved to the HP", 20},
+		{"assistant", "recap: the proxy moved", 30},
+		{"assistant", "the proxy moved", 20},
 	})
 
-	resp, stderr, code := run(t, cfg, "search", "proxy", "--recaps-only")
-
+	resp, stderr, code := run(t, cfg, "search", "proxy")
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
 	}
-	if resp.Total != 1 || !resp.Results[0].IsRecap {
-		t.Errorf("results = %+v, want a single recap", resp.Results)
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
 	}
-	if resp.RecapCount != 1 {
-		t.Errorf("RecapCount = %d, want 1", resp.RecapCount)
+}
+
+func TestSearchRejectsRemovedRecapFlags(t *testing.T) {
+	cfg := fixture(t, []msg{{"assistant", "proxy note", 10}})
+	for _, removed := range []string{"--prefer-recaps", "--recaps-only"} {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"search", "proxy", removed}, cfg, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("flag %s exit code = %d, want 2", removed, code)
+		}
 	}
 }
 
@@ -633,8 +640,7 @@ func TestNoMatchReturnsEmptyResultsAndZeroExit(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 for an empty result", code)
 	}
-	want := `{"results":[],"total":0,"recapCount":0,"truncated":false,"relaxed":false,` +
-		`"budget":{"limit":60000,"spent":0,"dropped":0,"shrunk":false}}`
+	want := `{"results":[],"total":0,"truncated":false,"relaxed":false,` + `"budget":{"limit":60000,"spent":0,"dropped":0,"shrunk":false}}`
 	if strings.TrimSpace(stdout.String()) != want {
 		t.Errorf("got %s, want %s", stdout.String(), want)
 	}
