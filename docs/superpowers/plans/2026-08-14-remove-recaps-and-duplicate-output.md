@@ -315,7 +315,7 @@ Remove the Recaps subsection. Keep the prose-vs-content and budget sections, upd
 Run:
 
 ```bash
-rg -n -- '--prefer-recaps|--recaps-only|isRecap|recapCount' README.md cmd internal
+rg -n --glob '!**/*_test.go' -- '--prefer-recaps|--recaps-only|isRecap|recapCount' README.md cmd internal
 ```
 
 Expected: no matches. The historical 2026-07-22 design document may retain its original requirements because it is a historical design record, not current behavior documentation.

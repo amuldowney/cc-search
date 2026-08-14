@@ -36,12 +36,10 @@ cc-search last 30 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47 --type user
 # concept research
 cc-search search "grayscale waveform"
 cc-search search "display.cpp" --limit 5 --window-hours 48
-cc-search search "firmware rollout" --prefer-recaps
 cc-search search "retry loop" --include-current  # include this pi session
 cc-search search "no such module: fts5" --all   # include tool calls + output
 cc-search search "battery dispatch reserve" --any  # any term, not all
 cc-search search '("caddy" OR "pihole") NOT "proxy"' --raw   # boolean logic
-cc-search search "caddy proxy" --recaps-only --full
 
 # read a hit in context (id, or any unique prefix, from a search result)
 cc-search read 36b182bb --before 3 --after 3
@@ -102,14 +100,16 @@ error, 2 on a usage mistake.
 
 ```json
 {"results":[{"id":"...","sessionId":"...","timestamp":"2026-07-23T04:01:04Z",
-"type":"assistant","isRecap":true,"preview":"Done. To recap: …","charCount":342}],
-"total":1,"recapCount":1,"truncated":false,"relaxed":false,
+"type":"assistant","preview":"Done. To recap: …","charCount":342}],
+"total":1,"truncated":false,"relaxed":false,
 "budget":{"limit":60000,"spent":342,"dropped":0,"shrunk":false}}
 ```
 
-Previews are collapsed to a single line and capped at 100 characters
-(`--preview-length N`); `--full` adds the complete `content` field.
-`truncated` is true when `--limit` cut results off.
+Compact output contains a single-line `preview` field capped at 100 characters
+(`--preview-length N`). `--full` replaces it with the complete `content` field;
+the two fields are never emitted together. Full content preserves newlines, and
+`--preview-length N` only affects compact output. `truncated` is true when
+`--limit` cut results off.
 
 Paths default to `~/.claude/projects/-home-andrew-Projects` and
 `~/.claude/search-index.db`, overridable with `--transcripts` and `--index`.
@@ -132,10 +132,6 @@ entirely. Without this a query like "caddy proxy" is dominated by
 `--all` switches to the full content, which is what you want when hunting a
 command, a path, an error string, or something that only ever appeared in
 command output.
-
-**Recaps.** An assistant message whose *prose* mentions "recap" is flagged
-`isRecap`. Tool-call arguments are deliberately excluded — otherwise running
-`cc-search --recaps-only` would flag its own command line as a recap.
 
 **Schema version.** The index records a version; an index written by an older
 build is discarded and rebuilt on open rather than migrated.
