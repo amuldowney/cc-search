@@ -17,7 +17,7 @@ type Result struct {
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
 	IsRecap   bool   `json:"isRecap"`
-	Preview   string `json:"preview"`
+	Preview   string `json:"preview,omitempty"`
 	Content   string `json:"content,omitempty"`
 	CharCount int    `json:"charCount"`
 }
@@ -121,7 +121,6 @@ func Format(msgs []transcript.Message, opts Options) Response {
 			Timestamp: time.UnixMilli(m.Timestamp).UTC().Format(time.RFC3339),
 			Type:      m.Type,
 			IsRecap:   m.IsRecap,
-			Preview:   body,
 			CharCount: m.CharCount,
 		}
 		if opts.UseProse {
@@ -129,7 +128,8 @@ func Format(msgs []transcript.Message, opts Options) Response {
 		}
 		if opts.Full {
 			r.Content = body
-			r.Preview = preview(bodies[i], length)
+		} else {
+			r.Preview = body
 		}
 		resp.Results = append(resp.Results, r)
 		if m.IsRecap {

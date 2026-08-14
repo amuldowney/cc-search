@@ -105,6 +105,32 @@ func TestFormatOmitsContentUnlessFull(t *testing.T) {
 	}
 }
 
+func TestFormatEmitsOnlyOneBodyField(t *testing.T) {
+	msgs := []transcript.Message{{Content: "line one\nline two"}}
+
+	compact, err := json.Marshal(Format(msgs, Options{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(compact), `"content"`) {
+		t.Errorf("compact output contains content: %s", compact)
+	}
+	if !strings.Contains(string(compact), `"preview":"line one line two"`) {
+		t.Errorf("compact output lacks preview: %s", compact)
+	}
+
+	full, err := json.Marshal(Format(msgs, Options{Full: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(full), `"preview"`) {
+		t.Errorf("full output contains preview: %s", full)
+	}
+	if !strings.Contains(string(full), `"content":"line one\nline two"`) {
+		t.Errorf("full output lacks exact content: %s", full)
+	}
+}
+
 func TestFormatUseProseRendersProsePreview(t *testing.T) {
 	msgs := []transcript.Message{{
 		Content:   `[tool: Bash] {"command":"ls"}` + "\n" + "here is the listing",
