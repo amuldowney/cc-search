@@ -72,8 +72,8 @@ func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
 	if err := db.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("schema version = %d, want 4", version)
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
 	}
 
 	var columns int
@@ -622,6 +622,111 @@ func TestSyncSkipsCorruptLines(t *testing.T) {
 	}
 	if stats.MessagesIndexed != 1 {
 		t.Fatalf("MessagesIndexed = %d, want 1", stats.MessagesIndexed)
+	}
+}
+
+func TestSyncKeepsSeparateFilesWithSharedSessionID(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	writeRawTranscript(t, dir, "session-a", []string{
+		fmt.Sprintf(`{"type":"user","uuid":"parent-message","sessionId":"shared-session","timestamp":%q,"message":{"content":"from parent"}}`, ts),
+	})
+	writeRawTranscript(t, dir, "agent-a", []string{
+		fmt.Sprintf(`{"type":"assistant","uuid":"agent-message","sessionId":"shared-session","timestamp":%q,"message":{"content":"from agent"}}`, ts),
+	})
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Last(LastOptions{N: 10, SessionID: "shared-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want both transcript files for the shared session: %+v", len(got), got)
+	}
+}
+
+func TestSyncReindexesChangedPiFileByHeaderSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "2026-08-05T00-00-00-000Z_pi-session.jsonl")
+	header := `{"type":"session","version":3,"id":"pi-session","timestamp":"2026-08-05T00:00:00Z"}`
+	line := func(id, content string) string {
+		return fmt.Sprintf(`{"type":"message","id":%q,"timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":%q}]}}`,
+			id, time.Now().UTC().Format(time.RFC3339Nano), content)
+	}
+	write := func(id, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(header+"\n"+line(id, content)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(time.Minute)
+		if err := os.Chtimes(path, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("old-message", "old content")
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	write("new-message", "new content")
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Last(LastOptions{N: 10, SessionID: "pi-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "new content" {
+		t.Fatalf("got %+v, want only the changed Pi message", got)
+	}
+}
+
+func TestSyncKeepsPiMessagesWithDuplicateShortIDs(t *testing.T) {
+	dir := t.TempDir()
+	writePi := func(name, sessionID, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name+".jsonl")
+		body := fmt.Sprintf(
+			`{"type":"session","version":3,"id":%q,"timestamp":"2026-08-05T00:00:00Z"}`+"\n"+
+			`{"type":"message","id":"same-id","timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":%q}]}}`+"\n",
+			sessionID, time.Now().UTC().Format(time.RFC3339Nano), content)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePi("2026-08-05T00-00-00-000Z_pi-a", "pi-a", "from session a")
+	writePi("2026-08-05T00-00-01-000Z_pi-b", "pi-b", "from session b")
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Last(LastOptions{N: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want both Pi messages despite duplicate short IDs: %+v", len(got), got)
 	}
 }
 

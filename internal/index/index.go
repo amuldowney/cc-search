@@ -21,19 +21,20 @@ import (
 
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
-const schemaVersion = 4
+const schemaVersion = 5
 
 var errSchemaMismatch = errors.New("incompatible index schema")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
-  id        TEXT PRIMARY KEY,
-  sessionId TEXT,
-  timestamp INTEGER,
-  type      TEXT,
-  content   TEXT,
-  prose     TEXT,
-  charCount INTEGER
+  id         TEXT PRIMARY KEY,
+  sourcePath TEXT NOT NULL,
+  sessionId  TEXT,
+  timestamp  INTEGER,
+  type       TEXT,
+  content    TEXT,
+  prose      TEXT,
+  charCount  INTEGER
 );
 
 -- content is everything (tool calls, command output); prose is only what was
@@ -52,6 +53,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_time ON messages(sessionId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_source_path ON messages(sourcePath);
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO messages_fts(rowid, content, prose) VALUES (new.rowid, new.content, new.prose);
@@ -322,51 +324,66 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 	defer file.Close()
 
+	// Parse before starting the transaction so Pi's header session ID is
+	// available when removing the previous contents of a changed file. Pi
+	// filenames include a timestamp (<timestamp>_<uuid>), while its messages
+	// use the bare UUID from the session header.
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	parser := new(transcript.Parser)
+	messages := []transcript.Message{}
+	for scanner.Scan() {
+		msg, ok := parser.ParseLine(scanner.Bytes())
+		if !ok {
+			continue
+		}
+		rawSessionID := msg.SessionID
+		if msg.SessionID == "" {
+			msg.SessionID = session
+		}
+		if rawSessionID != "" && rawSessionID != session {
+			// Pi message IDs are only unique within a session. Keep the
+			// transcript ID recognizable while making the index key global so
+			// messages from different sessions cannot overwrite each other.
+			msg.ID = rawSessionID + ":" + msg.ID
+		}
+		messages = append(messages, msg)
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("scan %s: %w", path, err)
+	}
+
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM messages WHERE sessionId = ?`, session); err != nil {
+	if _, err := tx.Exec(`DELETE FROM messages WHERE sourcePath = ?`, path); err != nil {
 		return 0, err
 	}
 
 	insert, err := tx.Prepare(`
-		INSERT INTO messages (id, sessionId, timestamp, type, content, prose, charCount)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (id, sourcePath, sessionId, timestamp, type, content, prose, charCount)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			sessionId = excluded.sessionId,
-			timestamp = excluded.timestamp,
-			type      = excluded.type,
-			content   = excluded.content,
-			prose     = excluded.prose,
-			charCount = excluded.charCount`)
+			sourcePath = excluded.sourcePath,
+			sessionId  = excluded.sessionId,
+			timestamp  = excluded.timestamp,
+			type       = excluded.type,
+			content    = excluded.content,
+			prose      = excluded.prose,
+			charCount  = excluded.charCount`)
 	if err != nil {
 		return 0, err
 	}
 	defer insert.Close()
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	parser := new(transcript.Parser)
-	count := 0
-	for scanner.Scan() {
-		msg, ok := parser.ParseLine(scanner.Bytes())
-		if !ok {
-			continue
-		}
-		if msg.SessionID == "" {
-			msg.SessionID = session
-		}
-		if _, err := insert.Exec(msg.ID, msg.SessionID, msg.Timestamp, msg.Type,
+	for _, msg := range messages {
+		if _, err := insert.Exec(msg.ID, path, msg.SessionID, msg.Timestamp, msg.Type,
 			msg.Content, msg.Prose, msg.CharCount); err != nil {
 			return 0, err
 		}
-		count++
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("scan %s: %w", path, err)
 	}
 
 	if _, err := tx.Exec(`
@@ -379,7 +396,7 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return count, nil
+	return len(messages), nil
 }
 
 const selectColumns = `id, sessionId, timestamp, type, content, prose, charCount`
