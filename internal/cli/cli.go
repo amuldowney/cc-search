@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/andrewmuldowney/cc-search/internal/index"
 	"github.com/andrewmuldowney/cc-search/internal/output"
+	"github.com/andrewmuldowney/cc-search/internal/server"
 	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
 
@@ -48,6 +51,8 @@ commands:
   search PATTERN [options]              full-text search across transcripts
   read ID [--before N] [--after N]      one message plus its neighbours
   rebuild [--session ID]                discard and rebuild the index
+  serve [--host 127.0.0.1] [--port N]  serve the local OpenAPI HTTP API
+       [--index PATH] [--transcripts DIR]
 
 search options:
   --limit N             maximum results returned
@@ -117,6 +122,8 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 		err = runRead(rest, cfg, stdout, stderr)
 	case "rebuild":
 		err = runRebuild(rest, cfg, stdout, stderr)
+	case "serve":
+		err = runServe(rest, cfg, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -387,6 +394,65 @@ func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 	fmt.Fprintf(stdout, "indexed %d messages from %d sessions\n",
 		stats.MessagesIndexed, stats.SessionsIndexed)
 	return nil
+}
+
+func runServe(args []string, cfg Config, stdout, stderr io.Writer) error {
+	set := flag.NewFlagSet("serve", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	host := set.String("host", "127.0.0.1", "loopback host to bind")
+	port := set.Int("port", 8765, "TCP port to bind (0 chooses an available port)")
+	indexPath := set.String("index", "", "index database to use")
+	transcriptDir := set.String("transcripts", "", "transcript directory to index")
+	if err := set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, set.Arg(0))
+	}
+	if !isLoopbackHost(*host) {
+		return fmt.Errorf("%w: --host must be localhost or a loopback address", errUsage)
+	}
+	if *port < 0 || *port > 65535 {
+		return fmt.Errorf("%w: --port must be between 0 and 65535", errUsage)
+	}
+
+	if *indexPath != "" {
+		cfg.IndexPath = *indexPath
+	}
+	if *transcriptDir != "" {
+		cfg.TranscriptDirs = []string{*transcriptDir}
+	}
+	resolved := cfg.withDefaults()
+	api, err := server.New(server.Config{
+		IndexPath:      resolved.IndexPath,
+		TranscriptDirs: resolved.TranscriptDirs,
+	})
+	if err != nil {
+		return err
+	}
+	defer api.Close()
+
+	listener, err := net.Listen("tcp", net.JoinHostPort(*host, strconv.Itoa(*port)))
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	address := listener.Addr().String()
+	fmt.Fprintf(stdout, "cc-search API listening on http://%s\n", address)
+
+	httpServer := &http.Server{Handler: api.Handler()}
+	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // currentSessionID identifies the pi conversation running this command. An

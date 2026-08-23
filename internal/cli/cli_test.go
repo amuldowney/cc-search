@@ -56,6 +56,19 @@ func run(t *testing.T, cfg Config, args ...string) (output.Response, string, int
 	return resp, stderr.String(), code
 }
 
+func TestServeAcceptsOnlyLoopbackHosts(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "localhost"} {
+		if !isLoopbackHost(host) {
+			t.Errorf("isLoopbackHost(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"0.0.0.0", "192.0.2.1", "example.test"} {
+		if isLoopbackHost(host) {
+			t.Errorf("isLoopbackHost(%q) = true, want false", host)
+		}
+	}
+}
+
 func TestLastReturnsRequestedCount(t *testing.T) {
 	cfg := fixture(t, []msg{
 		{"user", "oldest", 30},

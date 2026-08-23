@@ -3,13 +3,20 @@
 TAGS := sqlite_fts5
 PREFIX ?= $(HOME)/.local
 
-.PHONY: build test vet install clean
+.PHONY: build test test-clients generate-clients vet install clean
 
 build:
 	go build -tags $(TAGS) -o cc-search ./cmd/cc-search
 
 test:
 	go test -tags $(TAGS) ./...
+
+test-clients: generate-clients
+	python3 -m unittest discover -s clients/python -p 'test_*.py'
+	npm --prefix clients/typescript test
+
+generate-clients:
+	node scripts/generate-clients.mjs
 
 vet:
 	go vet -tags $(TAGS) ./...

@@ -1,3 +1,5 @@
 cc-search
+__pycache__/
+*.pyc
 *.db
 .worktrees/

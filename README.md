@@ -21,6 +21,35 @@ make build            # ./cc-search
 make install          # $HOME/.local/bin/cc-search
 ```
 
+## Agent API and clients
+
+`cc-search serve` exposes the same search operations through a versioned HTTP
+API bound to loopback. The port is configurable, and the service synchronizes
+transcripts before data operations:
+
+```bash
+cc-search serve --port 8765
+curl 'http://127.0.0.1:8765/v1/search?pattern=authentication&limit=5'
+curl http://127.0.0.1:8765/openapi.json
+```
+
+The OpenAPI document is [internal/server/openapi.json](internal/server/openapi.json)
+and is also available as `openapi/cc-search.json`. The checked-in agent clients
+are generated from it:
+
+```bash
+make generate-clients
+make test-clients
+```
+
+- Python: `clients/python/cc_search_client`
+- TypeScript: `clients/typescript/src`
+
+Both clients use structured responses and typed HTTP errors. They are intended
+for short agent scripts that compose search, selection, and context reads; use
+the CLI for a one-off lookup. The HTTP service is local-only and has no remote
+authentication boundary.
+
 ## Use
 
 Every run syncs the index before querying, so the data is always current. The

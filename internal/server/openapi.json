@@ -1,0 +1,254 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "cc-search Agent API",
+    "version": "1.0.0",
+    "description": "Local transcript search for Claude Code and pi agents. The service binds to loopback and synchronizes its derived index before data operations."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765",
+      "description": "Local cc-search service"
+    }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenApiDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Service is available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "operationId": "searchMessages",
+        "parameters": [
+          { "$ref": "#/components/parameters/Pattern" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/WindowMessages" },
+          { "$ref": "#/components/parameters/WindowHours" },
+          { "$ref": "#/components/parameters/Session" },
+          { "$ref": "#/components/parameters/Type" },
+          { "$ref": "#/components/parameters/IncludeCurrent" },
+          { "$ref": "#/components/parameters/Any" },
+          { "$ref": "#/components/parameters/Raw" },
+          { "$ref": "#/components/parameters/All" },
+          { "$ref": "#/components/parameters/Full" },
+          { "$ref": "#/components/parameters/PreviewLength" },
+          { "$ref": "#/components/parameters/Budget" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidInput" }
+        }
+      }
+    },
+    "/v1/last": {
+      "get": {
+        "operationId": "getLastMessages",
+        "parameters": [
+          { "$ref": "#/components/parameters/Count" },
+          { "$ref": "#/components/parameters/Hours" },
+          { "$ref": "#/components/parameters/Session" },
+          { "$ref": "#/components/parameters/Type" },
+          { "$ref": "#/components/parameters/All" },
+          { "$ref": "#/components/parameters/Full" },
+          { "$ref": "#/components/parameters/PreviewLength" },
+          { "$ref": "#/components/parameters/Budget" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent messages",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidInput" }
+        }
+      }
+    },
+    "/v1/read": {
+      "get": {
+        "operationId": "readMessageContext",
+        "parameters": [
+          { "$ref": "#/components/parameters/Id" },
+          { "$ref": "#/components/parameters/Before" },
+          { "$ref": "#/components/parameters/After" },
+          { "$ref": "#/components/parameters/All" },
+          { "$ref": "#/components/parameters/Full" },
+          { "$ref": "#/components/parameters/PreviewLength" },
+          { "$ref": "#/components/parameters/Budget" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message with neighboring context",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidInput" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/rebuild": {
+      "post": {
+        "operationId": "rebuildIndex",
+        "parameters": [
+          { "$ref": "#/components/parameters/Session" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rebuild statistics",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RebuildResponse" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Pattern": { "name": "pattern", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "Id": { "name": "id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "Session": { "name": "session", "in": "query", "schema": { "type": "string" } },
+      "Type": { "name": "type", "in": "query", "schema": { "type": "string" } },
+      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+      "Count": { "name": "count", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 10 } },
+      "Hours": { "name": "hours", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+      "WindowMessages": { "name": "window_messages", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+      "WindowHours": { "name": "window_hours", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+      "Before": { "name": "before", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 5 } },
+      "After": { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 5 } },
+      "PreviewLength": { "name": "preview_length", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 100 } },
+      "Budget": { "name": "budget", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 60000 } },
+      "All": { "name": "all", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "Full": { "name": "full", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "Any": { "name": "any", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "Raw": { "name": "raw", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "IncludeCurrent": { "name": "include_current", "in": "query", "schema": { "type": "boolean", "default": false } }
+    },
+    "responses": {
+      "InvalidInput": {
+        "description": "Request is invalid",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "NotFound": {
+        "description": "Message was not found",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Conflict": {
+        "description": "Message ID is ambiguous",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "InternalError": {
+        "description": "The service could not complete the request",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "required": ["version", "status"],
+        "properties": { "version": { "type": "integer" }, "status": { "type": "string", "const": "ok" } }
+      },
+      "Message": {
+        "type": "object",
+        "required": ["id", "sessionId", "timestamp", "type", "charCount"],
+        "properties": {
+          "id": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "type": { "type": "string" },
+          "preview": { "type": "string" },
+          "content": { "type": "string" },
+          "charCount": { "type": "integer" }
+        }
+      },
+      "Budget": {
+        "type": "object",
+        "required": ["limit", "spent", "dropped", "shrunk"],
+        "properties": {
+          "limit": { "type": "integer" },
+          "spent": { "type": "integer" },
+          "dropped": { "type": "integer" },
+          "shrunk": { "type": "boolean" }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "required": ["results", "total", "truncated", "relaxed", "budget"],
+        "properties": {
+          "results": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } },
+          "total": { "type": "integer" },
+          "truncated": { "type": "boolean" },
+          "relaxed": { "type": "boolean" },
+          "budget": { "$ref": "#/components/schemas/Budget" }
+        }
+      },
+      "RebuildResponse": {
+        "type": "object",
+        "required": ["version", "sessionsIndexed", "messagesIndexed", "filesSkipped"],
+        "properties": {
+          "version": { "type": "integer" },
+          "sessionsIndexed": { "type": "integer" },
+          "messagesIndexed": { "type": "integer" },
+          "filesSkipped": { "type": "integer" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["version", "error", "code"],
+        "properties": {
+          "version": { "type": "integer" },
+          "error": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      },
+      "OpenApiDocument": { "type": "object", "additionalProperties": true }
+    }
+  }
+}
