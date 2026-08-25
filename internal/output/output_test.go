@@ -38,6 +38,28 @@ func TestFormatRendersMessageFields(t *testing.T) {
 	}
 }
 
+func TestFormatCarriesActivityLinkMetadata(t *testing.T) {
+	got := Format([]transcript.Message{{
+		ID:               "child:entry-1",
+		SessionID:        "child-session",
+		Timestamp:        1784847600000,
+		Type:             "assistant",
+		Content:          "child result",
+		ActivityID:       "activity-1",
+		ActivityRole:     "child",
+		ParentActivityID: "parent-activity",
+		ParentSessionID:  "parent-session",
+		ChildSessionID:   "child-session",
+	}}, Options{})
+
+	r := got.Results[0]
+	if r.ActivityID != "activity-1" || r.ActivityRole != "child" ||
+		r.ParentActivityID != "parent-activity" || r.ParentSessionID != "parent-session" ||
+		r.ChildSessionID != "child-session" {
+		t.Fatalf("activity metadata = %+v", r)
+	}
+}
+
 func TestFormatTruncatesPreviewToDefaultLength(t *testing.T) {
 	long := strings.Repeat("a", 250)
 

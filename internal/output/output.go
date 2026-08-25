@@ -12,13 +12,18 @@ import (
 
 // Result is one message as it appears in CLI output.
 type Result struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionId"`
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`
-	Preview   string `json:"preview,omitempty"`
-	Content   string `json:"content,omitempty"`
-	CharCount int    `json:"charCount"`
+	ID               string `json:"id"`
+	SessionID        string `json:"sessionId"`
+	Timestamp        string `json:"timestamp"`
+	Type             string `json:"type"`
+	ActivityID       string `json:"activityId,omitempty"`
+	ActivityRole     string `json:"activityRole,omitempty"`
+	ParentActivityID string `json:"parentActivityId,omitempty"`
+	ParentSessionID  string `json:"parentSessionId,omitempty"`
+	ChildSessionID   string `json:"childSessionId,omitempty"`
+	Preview          string `json:"preview,omitempty"`
+	Content          string `json:"content,omitempty"`
+	CharCount        int    `json:"charCount"`
 }
 
 // Response is the top-level JSON document.
@@ -114,11 +119,16 @@ func Format(msgs []transcript.Message, opts Options) Response {
 		resp.Budget.Spent += utf8.RuneCountInString(body)
 
 		r := Result{
-			ID:        m.ID,
-			SessionID: m.SessionID,
-			Timestamp: time.UnixMilli(m.Timestamp).UTC().Format(time.RFC3339),
-			Type:      m.Type,
-			CharCount: m.CharCount,
+			ID:               m.ID,
+			SessionID:        m.SessionID,
+			Timestamp:        time.UnixMilli(m.Timestamp).UTC().Format(time.RFC3339),
+			Type:             m.Type,
+			ActivityID:       m.ActivityID,
+			ActivityRole:     m.ActivityRole,
+			ParentActivityID: m.ParentActivityID,
+			ParentSessionID:  m.ParentSessionID,
+			ChildSessionID:   m.ChildSessionID,
+			CharCount:        m.CharCount,
 		}
 		if opts.UseProse {
 			r.CharCount = len(m.Prose)

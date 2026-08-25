@@ -72,8 +72,8 @@ func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
 	if err := db.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 
 	var columns int
@@ -703,7 +703,7 @@ func TestSyncKeepsPiMessagesWithDuplicateShortIDs(t *testing.T) {
 		path := filepath.Join(dir, name+".jsonl")
 		body := fmt.Sprintf(
 			`{"type":"session","version":3,"id":%q,"timestamp":"2026-08-05T00:00:00Z"}`+"\n"+
-			`{"type":"message","id":"same-id","timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":%q}]}}`+"\n",
+				`{"type":"message","id":"same-id","timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":%q}]}}`+"\n",
 			sessionID, time.Now().UTC().Format(time.RFC3339Nano), content)
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -1143,6 +1143,109 @@ func TestSyncIndexesNestedPiTranscripts(t *testing.T) {
 	}
 	if got[0].SessionID != "019fba87" {
 		t.Errorf("SessionID = %q, want the id from the pi session header", got[0].SessionID)
+	}
+}
+
+func TestSyncLinksPiActivitiesAcrossParentAndAttachedChild(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "parent.jsonl")
+	childPath := filepath.Join(root, "child.jsonl")
+	parent := strings.Join([]string{
+		`{"type":"session","version":3,"id":"parent-session","timestamp":"2026-08-25T02:34:00Z","cwd":"/work"}`,
+		`{"type":"message","id":"call-1","timestamp":"2026-08-25T02:34:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Agent","arguments":{"description":"inspect code"}}]}}`,
+		`{"type":"custom","customType":"pi:activity-started","id":"start-1","parentId":"call-1","timestamp":"2026-08-25T02:34:02Z","data":{"activityId":"activity-1","kind":"agent","namespace":"@tintinweb/pi-subagents","status":"running","startedAt":1787625242000,"title":"Explore","description":"inspect code"}}`,
+		fmt.Sprintf(`{"type":"message","id":"result-1","parentId":"start-1","timestamp":"2026-08-25T02:34:03Z","message":{"role":"toolResult","details":{"agentId":"activity-1"},"content":[{"type":"text","text":"Agent started in background. Agent ID: activity-1"}]}}`),
+		fmt.Sprintf(`{"type":"custom","customType":"pi:activity-linked","id":"link-1","parentId":"result-1","timestamp":"2026-08-25T02:34:04Z","data":{"activityId":"activity-1","sessionFile":%q}}`, childPath),
+		`{"type":"custom","customType":"pi:activity-terminal","id":"terminal-1","parentId":"result-1","timestamp":"2026-08-25T02:35:00Z","data":{"activityId":"activity-1","status":"completed","completedAt":1787625300000,"resultSummary":"done","toolUses":3}}`,
+	}, "\n") + "\n"
+	child := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","version":3,"id":"child-session","timestamp":"2026-08-25T02:34:04Z","cwd":"/work","parentSession":%q,"visibility":"attached"}`, parentPath),
+		`{"type":"message","id":"child-1","timestamp":"2026-08-25T02:34:05Z","message":{"role":"user","content":[{"type":"text","text":"inspect the activity linkage"}]}}`,
+		`{"type":"message","id":"child-2","timestamp":"2026-08-25T02:34:06Z","message":{"role":"assistant","content":[{"type":"text","text":"linkage is present"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Sync(root); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := db.Last(LastOptions{N: 20, ProseOnly: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(id string) transcript.Message {
+		for _, message := range all {
+			if message.EntryID == id || message.ID == id {
+				return message
+			}
+		}
+		t.Fatalf("message %q not found in %+v", id, all)
+		return transcript.Message{}
+	}
+
+	start := find("call-1")
+	if start.ActivityID != "activity-1" || start.ActivityRole != "start" ||
+		start.ParentSessionID != "parent-session" || start.ChildSessionID != "child-session" {
+		t.Fatalf("start link = %+v", start)
+	}
+	response := find("result-1")
+	if response.ActivityID != "activity-1" || response.ActivityRole != "response" ||
+		response.ChildSessionID != "child-session" {
+		t.Fatalf("response link = %+v", response)
+	}
+	childMessage := find("child-1")
+	if childMessage.ActivityID != "activity-1" || childMessage.ActivityRole != "child" ||
+		childMessage.ParentSessionID != "parent-session" || childMessage.ChildSessionID != "child-session" {
+		t.Fatalf("child link = %+v", childMessage)
+	}
+
+	var status, result string
+	if err := db.sql.QueryRow(`SELECT status, resultSummary FROM activities WHERE activityId = ?`, "activity-1").Scan(&status, &result); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || result != "done" {
+		t.Fatalf("activity = status %q result %q", status, result)
+	}
+}
+
+func TestSyncLinksAttachedChildWithoutActivityMarkers(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "z-parent.jsonl")
+	childPath := filepath.Join(root, "a-child.jsonl")
+	if err := os.WriteFile(parentPath, []byte(`{"type":"session","version":3,"id":"parent-session","timestamp":"2026-08-25T02:34:00Z","cwd":"/work"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := fmt.Sprintf(`{"type":"session","version":3,"id":"child-session","timestamp":"2026-08-25T02:34:04Z","cwd":"/work","parentSession":%q,"visibility":"attached"}`+"\n"+
+		`{"type":"message","id":"child-1","timestamp":"2026-08-25T02:34:05Z","message":{"role":"user","content":[{"type":"text","text":"orphan-safe child"}]}}`+"\n", parentPath)
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Sync(root); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Last(LastOptions{N: 1, SessionID: "child-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ActivityID != "child-session" || got[0].ActivityRole != "child" ||
+		got[0].ParentSessionID != "parent-session" || got[0].ChildSessionID != "child-session" {
+		t.Fatalf("attached fallback = %+v", got)
 	}
 }
 

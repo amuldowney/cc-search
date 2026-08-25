@@ -162,6 +162,15 @@ entirely. Without this a query like "caddy proxy" is dominated by
 command, a path, an error string, or something that only ever appeared in
 command output.
 
+**Subagent activities.** Pi activity markers are ingested separately from
+messages. Attached child sessions are linked through their `activityId`,
+`parentActivityId`, `parentSessionId`, and `childSessionId`; parent Agent
+start/response rows and child messages expose those fields in results. The index recognizes
+`pi:activity-started`, `pi:activity-linked`, and `pi:activity-terminal` records
+without treating them as searchable messages. An attached session header also
+provides a fallback link when markers are incomplete. Legacy transcripts without
+these markers remain ordinary session messages.
+
 **Schema version.** The index records a version; an index written by an older
 build is discarded and rebuilt on open rather than migrated.
 

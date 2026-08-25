@@ -4,6 +4,11 @@ export interface Message {
   sessionId: string;
   timestamp: string;
   type: string;
+  activityId?: string;
+  activityRole?: "start" | "response" | "terminal" | "child";
+  parentActivityId?: string;
+  parentSessionId?: string;
+  childSessionId?: string;
   preview?: string;
   content?: string;
   charCount: number;

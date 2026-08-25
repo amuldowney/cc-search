@@ -233,6 +233,40 @@ func TestParserTakesSessionIDFromPiHeader(t *testing.T) {
 	}
 }
 
+func TestParserReadsAttachedActivityLinks(t *testing.T) {
+	p := new(Parser)
+	lines := []string{
+		`{"type":"session","version":3,"id":"child-session","timestamp":"2026-08-25T02:34:48.858Z","cwd":"/repo","parentSession":"/repo/parent.jsonl","visibility":"attached"}`,
+		`{"type":"message","id":"call-1","parentId":null,"timestamp":"2026-08-25T02:34:49Z","message":{"role":"assistant","content":"launching"}}`,
+		`{"type":"custom","customType":"pi:activity-started","id":"start-1","parentId":"call-1","timestamp":"2026-08-25T02:34:49Z","data":{"activityId":"activity-1","parentActivityId":"parent-activity","kind":"agent","namespace":"test","status":"running","startedAt":1787625289000,"title":"Explore","description":"inspect code"}}`,
+		`{"type":"custom","customType":"pi:activity-linked","id":"link-1","parentId":"start-1","timestamp":"2026-08-25T02:34:50Z","data":{"activityId":"activity-1","sessionFile":"/repo/child.jsonl"}}`,
+		`{"type":"message","id":"result-1","parentId":"link-1","timestamp":"2026-08-25T02:34:51Z","message":{"role":"toolResult","details":{"agentId":"activity-1"},"content":[{"type":"text","text":"started"}]}}`,
+	}
+	for _, line := range lines {
+		_, _ = p.ParseLine([]byte(line))
+	}
+
+	session := p.Session()
+	if session.ID != "child-session" || session.ParentSession != "/repo/parent.jsonl" || session.Visibility != "attached" {
+		t.Fatalf("session = %+v", session)
+	}
+	events := p.ActivityEvents()
+	if len(events) != 2 || events[0].Kind != "started" || events[1].Kind != "linked" {
+		t.Fatalf("events = %+v", events)
+	}
+	if events[0].ParentID != "call-1" || events[0].ParentActivityID != "parent-activity" {
+		t.Fatalf("start event = %+v", events[0])
+	}
+	if events[1].SessionFile != "/repo/child.jsonl" {
+		t.Fatalf("linked event = %+v", events[1])
+	}
+
+	msg, ok := p.ParseLine([]byte(`{"type":"message","id":"result-2","timestamp":"2026-08-25T02:34:52Z","message":{"role":"toolResult","details":{"agentId":"activity-1"},"content":[{"type":"text","text":"done"}]}}`))
+	if !ok || msg.ActivityID != "activity-1" || msg.ActivityRole != "response" {
+		t.Fatalf("message = %+v, ok = %v", msg, ok)
+	}
+}
+
 func TestParseLineRendersPiToolCallBlock(t *testing.T) {
 	line := []byte(`{"type":"message","id":"a1",
 		"timestamp":"2026-07-31T23:34:19.197Z",

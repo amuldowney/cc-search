@@ -203,6 +203,11 @@
           "sessionId": { "type": "string" },
           "timestamp": { "type": "string", "format": "date-time" },
           "type": { "type": "string" },
+          "activityId": { "type": "string" },
+          "activityRole": { "type": "string", "enum": ["start", "response", "terminal", "child"] },
+          "parentActivityId": { "type": "string" },
+          "parentSessionId": { "type": "string" },
+          "childSessionId": { "type": "string" },
           "preview": { "type": "string" },
           "content": { "type": "string" },
           "charCount": { "type": "integer" }
