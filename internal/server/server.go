@@ -11,12 +11,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/andrewmuldowney/cc-search/internal/index"
 	"github.com/andrewmuldowney/cc-search/internal/output"
+	"github.com/andrewmuldowney/cc-search/internal/transcript"
 )
 
 // Config supplies the derived-data index and transcript roots used by the API.
@@ -79,6 +82,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/search", s.handleSearch)
 	mux.HandleFunc("/v1/last", s.handleLast)
 	mux.HandleFunc("/v1/read", s.handleRead)
+	mux.HandleFunc("/v1/sessions", s.handleSessions)
+	mux.HandleFunc("/v1/activities", s.handleActivities)
+	mux.HandleFunc("/v1/activity", s.handleActivity)
+	mux.HandleFunc("/v1/context", s.handleContext)
+	mux.HandleFunc("/v1/commands", s.handleCommands)
+	mux.HandleFunc("/v1/info", s.handleInfo)
+	mux.HandleFunc("/v1/doctor", s.handleDoctor)
 	mux.HandleFunc("/v1/rebuild", s.handleRebuild)
 	return mux
 }
@@ -289,6 +299,312 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	limit, err := nonNegativeInt(q, "limit", 20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	any, err := boolParam(q, "any")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	var rows []index.SessionSummary
+	err = s.withDB(func(db *index.DB) error {
+		rows, err = db.Sessions(index.SessionOptions{Query: strings.TrimSpace(q.Get("pattern")), Limit: limit, CWD: q.Get("cwd"), Any: any})
+		return err
+	})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if len(rows) == 0 && q.Get("pattern") != "" && !any && index.TermCount(q.Get("pattern")) > 1 {
+		err = s.withDB(func(db *index.DB) error {
+			rows, err = db.Sessions(index.SessionOptions{Query: q.Get("pattern"), Limit: limit, CWD: q.Get("cwd"), Any: true})
+			return err
+		})
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
+	response := output.SessionsResponse{Sessions: make([]output.Session, 0, len(rows)), Total: len(rows)}
+	for _, row := range rows {
+		response.Sessions = append(response.Sessions, output.Session{SessionID: row.SessionID, CWD: row.CWD,
+			Visibility: row.Visibility, ParentSessionID: row.ParentSessionID, LastTimestamp: timestamp(row.LastTimestamp),
+			LastPreview: compactPreview(row.LastPreview), MessageCount: row.MessageCount})
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleActivities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	limit, err := nonNegativeInt(q, "limit", 20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	var rows []index.ActivityRecord
+	err = s.withDB(func(db *index.DB) error {
+		rows, err = db.Activities(index.ActivityOptions{SessionID: q.Get("session"), Status: q.Get("status"), Limit: limit})
+		return err
+	})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	activities := make([]output.Activity, 0, len(rows))
+	full, err := boolParam(q, "full")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	for _, row := range rows {
+		activities = append(activities, activityOutput(row, full))
+	}
+	writeJSON(w, http.StatusOK, output.ActivitiesResponse{Activities: activities, Total: len(activities)})
+}
+
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	id := strings.TrimSpace(q.Get("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "invalid_input", "id is required")
+		return
+	}
+	var row index.ActivityRecord
+	err := s.withDB(func(db *index.DB) error { var e error; row, e = db.Activity(id); return e })
+	if err != nil {
+		status, code := http.StatusInternalServerError, "internal_error"
+		if errors.Is(err, index.ErrNoSuchActivity) {
+			status, code = http.StatusNotFound, "not_found"
+		}
+		if errors.Is(err, index.ErrAmbiguousActivity) {
+			status, code = http.StatusConflict, "ambiguous_id"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	full, err := boolParam(q, "full")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, activityOutput(row, full))
+}
+
+func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	pattern := strings.TrimSpace(q.Get("pattern"))
+	if pattern == "" {
+		writeError(w, http.StatusBadRequest, "invalid_input", "pattern is required")
+		return
+	}
+	hits, err := nonNegativeInt(q, "hits", 3)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	before, err := nonNegativeInt(q, "before", 3)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	after, err := nonNegativeInt(q, "after", 8)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	any, err := boolParam(q, "any")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	raw, err := boolParam(q, "raw")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	includeCurrent, err := boolParam(q, "include_current")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	if any && raw {
+		writeError(w, http.StatusBadRequest, "invalid_input", "any has no meaning for a raw query")
+		return
+	}
+	options, err := renderOptions(q)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	var selected []transcript.Message
+	relaxed := false
+	err = s.withDB(func(db *index.DB) error {
+		limit := hits
+		if limit > 0 {
+			limit++
+		}
+		exclude := ""
+		if q.Get("session") == "" && !includeCurrent {
+			exclude = currentSessionID()
+		}
+		search := index.SearchOptions{Query: pattern, Limit: limit, SessionID: q.Get("session"), ExcludeSessionID: exclude,
+			Type: q.Get("type"), ProseOnly: !options.All, Any: any, Raw: raw}
+		var e error
+		selected, e = db.Search(search)
+		if e != nil {
+			return e
+		}
+		if len(selected) == 0 && !any && !raw && index.TermCount(pattern) > 1 {
+			search.Any = true
+			selected, e = db.Search(search)
+			if e == nil {
+				relaxed = len(selected) > 0
+			}
+		}
+		return e
+	})
+	if err != nil {
+		if errors.Is(err, index.ErrBadQuery) {
+			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		} else {
+			writeDBError(w, err)
+		}
+		return
+	}
+	truncated := hits > 0 && len(selected) > hits
+	if truncated {
+		selected = selected[:hits]
+	}
+	var expanded []index.ContextMessage
+	err = s.withDB(func(db *index.DB) error {
+		var e error
+		expanded, e = db.ExpandContext(selected, before, after, !options.All)
+		return e
+	})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	contextMessages := make([]transcript.Message, 0, len(expanded))
+	for _, item := range expanded {
+		contextMessages = append(contextMessages, item.Message)
+	}
+	options.Options.Truncated, options.Options.Relaxed = truncated, relaxed
+	contextResponse := output.Format(contextMessages, options.Options)
+	hitOptions := options.Options
+	hitOptions.Budget = 0
+	hitResponse := output.Format(selected, hitOptions)
+	results := make([]output.ContextResult, 0, len(contextResponse.Results))
+	for i, result := range contextResponse.Results {
+		results = append(results, output.ContextResult{Result: result, HitIDs: expanded[i].HitIDs})
+	}
+	writeJSON(w, http.StatusOK, output.ContextResponse{Query: pattern, Hits: hitResponse.Results, Results: results,
+		TotalHits: len(selected), Total: len(results), Truncated: contextResponse.Truncated, Relaxed: relaxed, Budget: contextResponse.Budget})
+}
+
+func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	pattern := strings.TrimSpace(q.Get("pattern"))
+	if pattern == "" {
+		writeError(w, http.StatusBadRequest, "invalid_input", "pattern is required")
+		return
+	}
+	limit, err := nonNegativeInt(q, "limit", 20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	full, err := boolParam(q, "full")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	includeOutput, err := boolParam(q, "include_output")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	var rows []index.CommandRecord
+	queryLimit := limit
+	if queryLimit > 0 {
+		queryLimit++
+	}
+	err = s.withDB(func(db *index.DB) error {
+		var e error
+		rows, e = db.Commands(index.CommandOptions{Query: pattern, Tool: q.Get("tool"), SessionID: q.Get("session"), Limit: queryLimit, IncludeOutput: full || includeOutput})
+		return e
+	})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	truncated := limit > 0 && len(rows) > limit
+	if truncated {
+		rows = rows[:limit]
+	}
+	commands := make([]output.Command, 0, len(rows))
+	for _, row := range rows {
+		commands = append(commands, output.Command{Tool: row.Tool, Arguments: commandArguments(row.Arguments), SessionID: row.SessionID, MessageID: row.MessageID, Timestamp: timestamp(row.Timestamp), Output: row.Output})
+	}
+	writeJSON(w, http.StatusOK, output.CommandsResponse{Commands: commands, Total: len(commands), Truncated: truncated})
+}
+
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	var info output.InfoResponse
+	if err := s.withDB(func(db *index.DB) error { var e error; info, e = makeInfo(db, false); return e }); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	var info output.InfoResponse
+	if err := s.withDB(func(db *index.DB) error { var e error; info, e = makeInfo(db, true); return e }); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	checks := []output.DoctorCheck{{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath}, {Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)}, {Name: "lock", OK: info.LockHealthy, Detail: "lifecycle lock acquired"}}
+	ok := true
+	for _, check := range checks {
+		ok = ok && check.OK
+	}
+	writeJSON(w, http.StatusOK, output.DoctorResponse{InfoResponse: info, OK: ok, Checks: checks})
+}
+
 func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -317,6 +633,71 @@ func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 		"messagesIndexed": stats.MessagesIndexed,
 		"filesSkipped":    stats.FilesSkipped,
 	})
+}
+
+func activityOutput(row index.ActivityRecord, full bool) output.Activity {
+	activity := output.Activity{ActivityID: row.ActivityID, Status: row.Status, Title: row.Title, Model: row.Model,
+		Effort: row.Effort, ToolUses: row.ToolUses, StartedAt: timestamp(row.StartedAt), CompletedAt: timestamp(row.CompletedAt),
+		ParentSessionID: row.ParentSessionID, ChildSessionID: row.ChildSessionID, ParentActivityID: row.ParentActivityID, ResultSummary: row.ResultSummary}
+	if full {
+		activity.Description, activity.Kind, activity.Namespace = row.Description, row.Kind, row.Namespace
+		activity.StartEntryID, activity.StartParentID = row.StartEntryID, row.StartParentID
+		activity.LinkedEntryID, activity.TerminalEntryID, activity.TerminalParentID = row.LinkedEntryID, row.TerminalEntryID, row.TerminalParentID
+	}
+	return activity
+}
+
+func commandArguments(raw string) any {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err == nil {
+		return value
+	}
+	return raw
+}
+
+func timestamp(milliseconds int64) string {
+	if milliseconds == 0 {
+		return ""
+	}
+	return time.UnixMilli(milliseconds).UTC().Format(time.RFC3339)
+}
+
+func compactPreview(content string) string {
+	flat := strings.Join(strings.Fields(content), " ")
+	runes := []rune(flat)
+	if len(runes) > output.DefaultPreviewLength {
+		return string(runes[:output.DefaultPreviewLength]) + "…"
+	}
+	return flat
+}
+
+func makeInfo(db *index.DB, verify bool) (output.InfoResponse, error) {
+	stats, err := db.Info()
+	if err != nil {
+		return output.InfoResponse{}, err
+	}
+	if verify {
+		stats.IndexHealthy = db.Check() == nil
+	}
+	binaryPath, _ := os.Executable()
+	if resolved, resolveErr := filepath.EvalSymlinks(binaryPath); resolveErr == nil {
+		binaryPath = resolved
+	}
+	binaryVersion := "dev"
+	if build, ok := debug.ReadBuildInfo(); ok && build.Main.Version != "" && build.Main.Version != "(devel)" {
+		binaryVersion = build.Main.Version
+	}
+	info := output.InfoResponse{IndexPath: stats.IndexPath, SchemaVersion: stats.SchemaVersion,
+		MessageCount: stats.MessageCount, SessionCount: stats.SessionCount, ActivityCount: stats.ActivityCount,
+		FileCount: stats.FileCount, Sources: make([]output.Source, 0, len(stats.Sources)), BinaryPath: binaryPath,
+		BinaryVersion: binaryVersion, CurrentSession: currentSessionID(), IndexHealthy: stats.IndexHealthy, LockHealthy: true}
+	for _, source := range stats.Sources {
+		info.Sources = append(info.Sources, output.Source{Path: source.Path, MessageCount: source.MessageCount, SessionCount: source.SessionCount})
+	}
+	return info, nil
 }
 
 // outputOptions keeps HTTP query names separate from the CLI flag parser.

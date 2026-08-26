@@ -34,6 +34,84 @@ export interface Health {
   status: "ok";
 }
 
+export interface Session {
+  sessionId: string;
+  cwd: string;
+  visibility: string;
+  parentSessionId: string;
+  lastTimestamp: string;
+  lastPreview: string;
+  messageCount: number;
+}
+
+export interface SessionsResponse { sessions: Session[]; total: number }
+
+export interface Activity {
+  activityId: string;
+  status: string;
+  title: string;
+  model: string;
+  effort: string;
+  toolUses: number;
+  startedAt: string;
+  completedAt: string;
+  parentSessionId: string;
+  childSessionId: string;
+  parentActivityId: string;
+  resultSummary: string;
+  description?: string;
+  kind?: string;
+  namespace?: string;
+  startEntryId?: string;
+  startParentId?: string;
+  linkedEntryId?: string;
+  terminalEntryId?: string;
+  terminalParentId?: string;
+}
+
+export interface ActivitiesResponse { activities: Activity[]; total: number }
+
+export interface Command {
+  tool: string;
+  arguments: unknown;
+  sessionId: string;
+  messageId: string;
+  timestamp: string;
+  output?: string;
+}
+
+export interface CommandsResponse { commands: Command[]; total: number; truncated: boolean }
+
+export interface ContextResult extends Message { hitIds?: string[] }
+export interface ContextResponse {
+  query: string;
+  hits: Message[];
+  results: ContextResult[];
+  totalHits: number;
+  total: number;
+  truncated: boolean;
+  relaxed: boolean;
+  budget: Budget;
+}
+
+export interface Source { path: string; messageCount: number; sessionCount: number }
+export interface InfoResponse {
+  indexPath: string;
+  schemaVersion: number;
+  messageCount: number;
+  sessionCount: number;
+  activityCount: number;
+  fileCount: number;
+  sources: Source[];
+  binaryPath: string;
+  binaryVersion: string;
+  currentSession: string;
+  indexHealthy: boolean;
+  lockHealthy: boolean;
+}
+export interface DoctorCheck { name: string; ok: boolean; detail?: string }
+export interface DoctorResponse extends InfoResponse { ok: boolean; checks: DoctorCheck[] }
+
 export interface RebuildResponse {
   version: number;
   sessionsIndexed: number;
@@ -76,6 +154,25 @@ export interface ReadParams {
   preview_length?: number;
   budget?: number;
 }
+
+export interface SessionParams { pattern?: string; limit?: number; cwd?: string; any?: boolean }
+export interface ActivityParams { session?: string; status?: string; limit?: number; full?: boolean }
+export interface ActivityDetailParams { full?: boolean }
+export interface ContextParams {
+  hits?: number;
+  before?: number;
+  after?: number;
+  session?: string;
+  type?: string;
+  include_current?: boolean;
+  any?: boolean;
+  raw?: boolean;
+  all?: boolean;
+  full?: boolean;
+  preview_length?: number;
+  budget?: number;
+}
+export interface CommandParams { tool?: string; session?: string; limit?: number; full?: boolean; include_output?: boolean }
 
 export interface CcSearchClientOptions {
   baseUrl?: string;
@@ -132,6 +229,34 @@ export class CcSearchClient {
 
   async read(id: string, params: ReadParams = {}): Promise<MessageResponse> {
     return this.request<MessageResponse>("GET", "/v1/read", { id, ...params });
+  }
+
+  async sessions(params: SessionParams = {}): Promise<SessionsResponse> {
+    return this.request<SessionsResponse>("GET", "/v1/sessions", params);
+  }
+
+  async activities(params: ActivityParams = {}): Promise<ActivitiesResponse> {
+    return this.request<ActivitiesResponse>("GET", "/v1/activities", params);
+  }
+
+  async activity(id: string, params: ActivityDetailParams = {}): Promise<Activity> {
+    return this.request<Activity>("GET", "/v1/activity", { id, ...params });
+  }
+
+  async context(pattern: string, params: ContextParams = {}): Promise<ContextResponse> {
+    return this.request<ContextResponse>("GET", "/v1/context", { pattern, ...params });
+  }
+
+  async commands(pattern: string, params: CommandParams = {}): Promise<CommandsResponse> {
+    return this.request<CommandsResponse>("GET", "/v1/commands", { pattern, ...params });
+  }
+
+  async info(): Promise<InfoResponse> {
+    return this.request<InfoResponse>("GET", "/v1/info");
+  }
+
+  async doctor(): Promise<DoctorResponse> {
+    return this.request<DoctorResponse>("GET", "/v1/doctor");
   }
 
   async rebuild(session?: string): Promise<RebuildResponse> {

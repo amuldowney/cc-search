@@ -72,8 +72,8 @@ func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
 	if err := db.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 
 	var columns int

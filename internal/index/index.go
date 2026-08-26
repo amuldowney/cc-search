@@ -5,6 +5,7 @@ package index
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,7 +22,10 @@ import (
 
 // schemaVersion is bumped whenever the tables change. An index written by a
 // different version is discarded rather than migrated — it is all derived data.
-const schemaVersion = 6
+const schemaVersion = 7
+
+// SchemaVersion is the current derived-index schema version.
+const SchemaVersion = schemaVersion
 
 var errSchemaMismatch = errors.New("incompatible index schema")
 
@@ -37,7 +41,9 @@ CREATE TABLE IF NOT EXISTS messages (
   prose        TEXT,
   charCount    INTEGER,
   activityId   TEXT,
-  activityRole TEXT
+  activityRole TEXT,
+  toolCalls    TEXT,
+  toolResults  TEXT
 );
 
 -- content is everything (tool calls, command output); prose is only what was
@@ -126,6 +132,7 @@ CREATE TABLE IF NOT EXISTS files (
 type DB struct {
 	sql       *sql.DB
 	lifecycle *lifecycleLock
+	path      string
 }
 
 // SyncStats reports what a Sync changed.
@@ -182,6 +189,7 @@ func Open(path string) (*DB, error) {
 	db, err := open(path)
 	if err == nil {
 		db.lifecycle = lifecycle
+		db.path = path
 		return db, nil
 	}
 	if !shouldRebuild(err) {
@@ -196,6 +204,7 @@ func Open(path string) (*DB, error) {
 		return fail(err)
 	}
 	db.lifecycle = lifecycle
+	db.path = path
 	return db, nil
 }
 
@@ -254,10 +263,9 @@ func open(path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
-	if _, err := handle.Exec(`PRAGMA quick_check`); err != nil {
-		handle.Close()
-		return nil, fmt.Errorf("integrity check: %w", err)
-	}
+	// Full integrity checking is intentionally not done here. This function
+	// runs before every CLI query, and quick_check scans the entire database
+	// (including the large FTS tables). `doctor` calls DB.Check explicitly.
 	return &DB{sql: handle}, nil
 }
 
@@ -502,8 +510,8 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 
 	insert, err := tx.Prepare(`
-		INSERT INTO messages (id, entryId, sourcePath, sessionId, timestamp, type, content, prose, charCount, activityId, activityRole)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (id, entryId, sourcePath, sessionId, timestamp, type, content, prose, charCount, activityId, activityRole, toolCalls, toolResults)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			entryId      = excluded.entryId,
 			sourcePath   = excluded.sourcePath,
@@ -514,15 +522,26 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 			prose        = excluded.prose,
 			charCount    = excluded.charCount,
 			activityId   = excluded.activityId,
-			activityRole = excluded.activityRole`)
+			activityRole = excluded.activityRole,
+			toolCalls    = excluded.toolCalls,
+			toolResults  = excluded.toolResults`)
 	if err != nil {
 		return 0, err
 	}
 	defer insert.Close()
 
 	for _, msg := range messages {
+		calls, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return 0, err
+		}
+		results, err := json.Marshal(msg.ToolResults)
+		if err != nil {
+			return 0, err
+		}
 		if _, err := insert.Exec(msg.ID, msg.EntryID, path, msg.SessionID, msg.Timestamp, msg.Type,
-			msg.Content, msg.Prose, msg.CharCount, msg.ActivityID, msg.ActivityRole); err != nil {
+			msg.Content, msg.Prose, msg.CharCount, msg.ActivityID, msg.ActivityRole,
+			string(calls), string(results)); err != nil {
 			return 0, err
 		}
 	}
@@ -608,6 +627,23 @@ func aggregateActivities(path, parentSessionID string, events []transcript.Activ
 			activity.CompletedAt = event.CompletedAt
 			activity.ResultSummary = event.ResultSummary
 			activity.ToolUses = event.ToolUses
+		case "task-notification":
+			if activity.StartedAt == 0 {
+				activity.StartedAt = event.StartedAt
+			}
+			activity.Status = event.Status
+			if event.CompletedAt != 0 {
+				activity.CompletedAt = event.CompletedAt
+			}
+			if event.Title != "" {
+				activity.Title = event.Title
+			}
+			if event.Description != "" {
+				activity.Description = event.Description
+			}
+			activity.Kind = event.ActivityKind
+			activity.Namespace = event.Namespace
+			activity.ResultSummary = event.ResultSummary
 		}
 	}
 
@@ -650,6 +686,8 @@ func selectColumns(alias string) string {
 		alias + ".content",
 		alias + ".prose",
 		alias + ".charCount",
+		alias + ".toolCalls",
+		alias + ".toolResults",
 		"COALESCE(NULLIF(" + alias + ".activityId, ''), childActivity.activityId, '')",
 		"COALESCE(NULLIF(" + alias + ".activityRole, ''), CASE WHEN childActivity.activityId IS NOT NULL THEN 'child' ELSE '' END)",
 		"COALESCE(NULLIF(directActivity.parentActivityId, ''), childActivity.parentActivityId, '')",
@@ -767,10 +805,17 @@ func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
 	msgs := []transcript.Message{}
 	for rows.Next() {
 		var m transcript.Message
+		var calls, results string
 		if err := rows.Scan(&m.ID, &m.EntryID, &m.SessionID, &m.Timestamp, &m.Type,
-			&m.Content, &m.Prose, &m.CharCount, &m.ActivityID, &m.ActivityRole,
+			&m.Content, &m.Prose, &m.CharCount, &calls, &results, &m.ActivityID, &m.ActivityRole,
 			&m.ParentActivityID, &m.ParentSessionID, &m.ChildSessionID); err != nil {
 			return nil, err
+		}
+		if calls != "" {
+			_ = json.Unmarshal([]byte(calls), &m.ToolCalls)
+		}
+		if results != "" {
+			_ = json.Unmarshal([]byte(results), &m.ToolResults)
 		}
 		msgs = append(msgs, m)
 	}
@@ -800,6 +845,549 @@ func ftsQuery(pattern string, any bool) string {
 
 // TermCount reports how many terms a pattern will search for.
 func TermCount(pattern string) int { return len(strings.Fields(pattern)) }
+
+// SessionOptions selects session summaries. Query matches indexed prose and
+// CWD is an exact working-directory filter.
+type SessionOptions struct {
+	Query            string
+	Limit            int
+	CWD              string
+	Any              bool
+	ExcludeSessionID string
+}
+
+// SessionSummary is the compact row returned by the sessions command.
+type SessionSummary struct {
+	SessionID       string
+	CWD             string
+	Visibility      string
+	ParentSessionID string
+	LastTimestamp   int64
+	LastPreview     string
+	MessageCount    int
+}
+
+// Sessions returns one summary per indexed transcript session, newest first.
+func (d *DB) Sessions(opts SessionOptions) ([]SessionSummary, error) {
+	query := `
+		SELECT COALESCE(s.sessionId, ''), COALESCE(s.cwd, ''), COALESCE(s.visibility, ''),
+		       COALESCE(parent.sessionId, NULLIF(s.parentSession, ''), ''),
+		       COALESCE(MAX(m.timestamp), 0),
+		       COALESCE((SELECT CASE WHEN latest.prose != '' THEN latest.prose ELSE latest.content END
+						 FROM messages latest WHERE latest.sourcePath = s.sourcePath
+						 ORDER BY latest.timestamp DESC, latest.rowid DESC LIMIT 1), ''),
+		       COUNT(m.id)
+		FROM sessions s
+		LEFT JOIN sessions parent ON parent.sourcePath = s.parentSession
+		LEFT JOIN messages m ON m.sourcePath = s.sourcePath
+		WHERE 1 = 1`
+	args := []any{}
+	if opts.CWD != "" {
+		query += ` AND s.cwd = ?`
+		args = append(args, opts.CWD)
+	}
+	if opts.ExcludeSessionID != "" {
+		query += ` AND s.sessionId != ?`
+		args = append(args, opts.ExcludeSessionID)
+	}
+	if opts.Query != "" {
+		match := "{prose} : (" + ftsQuery(opts.Query, opts.Any) + ")"
+		query += ` AND EXISTS (
+			SELECT 1 FROM messages_fts f
+			JOIN messages matched ON matched.rowid = f.rowid
+			WHERE matched.sourcePath = s.sourcePath AND f.messages_fts MATCH ?)`
+		args = append(args, match)
+	}
+	query += ` GROUP BY s.sourcePath, s.sessionId, s.cwd, s.visibility, s.parentSession, parent.sessionId
+		ORDER BY MAX(m.timestamp) DESC, s.sessionId`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := d.sql.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionSummary{}
+	for rows.Next() {
+		var summary SessionSummary
+		if err := rows.Scan(&summary.SessionID, &summary.CWD, &summary.Visibility,
+			&summary.ParentSessionID, &summary.LastTimestamp, &summary.LastPreview,
+			&summary.MessageCount); err != nil {
+			return nil, err
+		}
+		out = append(out, summary)
+	}
+	return out, rows.Err()
+}
+
+// ActivityOptions selects recorded Pi subagent activities.
+type ActivityOptions struct {
+	SessionID string
+	Status    string
+	Limit     int
+}
+
+// ActivityRecord is the normalized activity metadata stored in the index.
+type ActivityRecord struct {
+	ActivityID       string
+	Status           string
+	Title            string
+	Description      string
+	Model            string
+	Effort           string
+	ToolUses         int
+	StartedAt        int64
+	CompletedAt      int64
+	ParentSessionID  string
+	ChildSessionID   string
+	ParentActivityID string
+	Kind             string
+	Namespace        string
+	ResultSummary    string
+	StartEntryID     string
+	StartParentID    string
+	LinkedEntryID    string
+	TerminalEntryID  string
+	TerminalParentID string
+}
+
+const activityColumns = `COALESCE(a.activityId, ''), COALESCE(a.status, ''), COALESCE(a.title, ''),
+	COALESCE(a.description, ''), COALESCE(a.model, ''), COALESCE(a.effort, ''),
+	COALESCE(a.toolUses, 0), COALESCE(a.startedAt, 0), COALESCE(a.completedAt, 0),
+	COALESCE(NULLIF(a.parentSessionId, ''), parent.sessionId, NULLIF(a.parentSourcePath, ''), ''),
+	COALESCE(child.sessionId, ''), COALESCE(a.parentActivityId, ''), COALESCE(a.kind, ''),
+	COALESCE(a.namespace, ''), COALESCE(a.resultSummary, ''), COALESCE(a.startEntryId, ''),
+	COALESCE(a.startParentId, ''), COALESCE(a.linkedEntryId, ''),
+	COALESCE(a.terminalEntryId, ''), COALESCE(a.terminalParentId, '')`
+
+func (d *DB) Activities(opts ActivityOptions) ([]ActivityRecord, error) {
+	query := `SELECT ` + activityColumns + `
+		FROM activities a
+		LEFT JOIN sessions parent ON parent.sourcePath = a.parentSourcePath
+		LEFT JOIN sessions child ON child.sourcePath = a.childSessionPath
+		WHERE 1 = 1`
+	args := []any{}
+	if opts.SessionID != "" {
+		query += ` AND (COALESCE(NULLIF(a.parentSessionId, ''), parent.sessionId) = ? OR child.sessionId = ?)`
+		args = append(args, opts.SessionID, opts.SessionID)
+	}
+	if opts.Status != "" {
+		query += ` AND lower(a.status) = lower(?)`
+		args = append(args, opts.Status)
+	}
+	query += ` ORDER BY COALESCE(NULLIF(a.startedAt, 0), a.completedAt) DESC, a.activityId`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	return d.collectActivities(query, args...)
+}
+
+var (
+	ErrNoSuchActivity    = errors.New("no activity with that id")
+	ErrAmbiguousActivity = errors.New("ambiguous activity id")
+)
+
+// Activity resolves an exact activity id or a unique prefix.
+func (d *DB) Activity(id string) (ActivityRecord, error) {
+	query := `SELECT ` + activityColumns + `
+		FROM activities a
+		LEFT JOIN sessions parent ON parent.sourcePath = a.parentSourcePath
+		LEFT JOIN sessions child ON child.sourcePath = a.childSessionPath
+		WHERE a.activityId = ?`
+	rows, err := d.collectActivities(query, id)
+	if err != nil {
+		return ActivityRecord{}, err
+	}
+	if len(rows) == 0 {
+		rows, err = d.collectActivities(`SELECT `+activityColumns+`
+			FROM activities a
+			LEFT JOIN sessions parent ON parent.sourcePath = a.parentSourcePath
+			LEFT JOIN sessions child ON child.sourcePath = a.childSessionPath
+			WHERE a.activityId LIKE ? ESCAPE '\\' ORDER BY a.activityId LIMIT 2`, escapeLike(id)+"%")
+		if err != nil {
+			return ActivityRecord{}, err
+		}
+		switch len(rows) {
+		case 0:
+			return ActivityRecord{}, fmt.Errorf("%w: %q", ErrNoSuchActivity, id)
+		case 1:
+		default:
+			return ActivityRecord{}, fmt.Errorf("%w: %q matches at least %q and %q",
+				ErrAmbiguousActivity, id, rows[0].ActivityID, rows[1].ActivityID)
+		}
+	}
+	return rows[0], nil
+}
+
+func (d *DB) collectActivities(query string, args ...any) ([]ActivityRecord, error) {
+	rows, err := d.sql.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ActivityRecord{}
+	for rows.Next() {
+		var activity ActivityRecord
+		if err := rows.Scan(&activity.ActivityID, &activity.Status, &activity.Title,
+			&activity.Description, &activity.Model, &activity.Effort, &activity.ToolUses,
+			&activity.StartedAt, &activity.CompletedAt, &activity.ParentSessionID,
+			&activity.ChildSessionID, &activity.ParentActivityID, &activity.Kind,
+			&activity.Namespace, &activity.ResultSummary, &activity.StartEntryID,
+			&activity.StartParentID, &activity.LinkedEntryID, &activity.TerminalEntryID,
+			&activity.TerminalParentID); err != nil {
+			return nil, err
+		}
+		out = append(out, activity)
+	}
+	return out, rows.Err()
+}
+
+// CommandOptions selects exact tool invocations. Query is matched against the
+// full indexed message, so either invocation arguments or a paired result can
+// locate a command.
+type CommandOptions struct {
+	Query         string
+	Tool          string
+	SessionID     string
+	Limit         int
+	IncludeOutput bool
+}
+
+// CommandRecord is a normalized historical tool invocation.
+type CommandRecord struct {
+	Tool      string
+	Arguments string
+	SessionID string
+	MessageID string
+	Timestamp int64
+	Output    string
+}
+
+// Commands returns tool calls ordered newest first. Tool results are paired by
+// their durable tool-call id; old records without ids fall back to a nearby
+// message in the same session. Only messages matching Query are read from the
+// FTS index; nearby rows are fetched on demand, rather than scanning every
+// tool record in the corpus.
+func (d *DB) Commands(opts CommandOptions) ([]CommandRecord, error) {
+	var candidates []transcript.Message
+	if opts.Query != "" {
+		var err error
+		// A command result is discovered through either its call or its
+		// paired output. Overfetch a bounded number of FTS hits so a small
+		// command limit does not require materializing every prose match.
+		candidateLimit := 0
+		if opts.Limit > 0 {
+			candidateLimit = opts.Limit * 16
+			if candidateLimit < 256 {
+				candidateLimit = 256
+			}
+		}
+		candidates, err = d.Search(SearchOptions{Query: opts.Query, Limit: candidateLimit, SessionID: opts.SessionID, ProseOnly: false})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		candidates, err = d.collect(`SELECT ` + selectColumns("m") + ` FROM messages m` + activityJoins("m") +
+			` WHERE m.toolCalls != '' OR m.toolResults != ''
+			ORDER BY m.sessionId, m.timestamp, m.rowid`)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	type call struct {
+		record CommandRecord
+		id     string
+	}
+	callsByID := map[string]*call{}
+	matchedCalls := map[*call]bool{}
+	pendingResults := []struct {
+		message transcript.Message
+		result  transcript.ToolResult
+	}{}
+	addCall := func(message transcript.Message, tool transcript.ToolCall) *call {
+		if opts.Tool != "" && !strings.EqualFold(opts.Tool, tool.Name) {
+			return nil
+		}
+		key := messageKey(message) + "\x00" + tool.ID
+		if existing := callsByID[key]; existing != nil {
+			return existing
+		}
+		item := &call{record: CommandRecord{Tool: tool.Name, Arguments: tool.Arguments,
+			SessionID: message.SessionID, MessageID: message.ID, Timestamp: message.Timestamp}, id: tool.ID}
+		if tool.ID != "" {
+			callsByID[key] = item
+			// This secondary map is filled below with the session-scoped id.
+			callsByID[message.SessionID+"\x00"+tool.ID] = item
+		}
+		return item
+	}
+	for _, message := range candidates {
+		if opts.SessionID != "" && message.SessionID != opts.SessionID {
+			continue
+		}
+		for _, tool := range message.ToolCalls {
+			if item := addCall(message, tool); item != nil {
+				matchedCalls[item] = true
+			}
+		}
+		for _, result := range message.ToolResults {
+			pendingResults = append(pendingResults, struct {
+				message transcript.Message
+				result  transcript.ToolResult
+			}{message, result})
+		}
+	}
+
+	for _, pending := range pendingResults {
+		item := callsByID[pending.message.SessionID+"\x00"+pending.result.ID]
+		if item == nil {
+			nearby, err := d.toolMessagesBefore(pending.message.SessionID, pending.message.Timestamp)
+			if err != nil {
+				return nil, err
+			}
+			for _, message := range nearby {
+				for _, tool := range message.ToolCalls {
+					if pending.result.ID == "" || tool.ID == pending.result.ID {
+						item = addCall(transcript.Message{ID: message.ID, SessionID: message.SessionID, Timestamp: message.Timestamp}, tool)
+						if item != nil {
+							break
+						}
+					}
+				}
+				if item != nil {
+					break
+				}
+			}
+		}
+		if item == nil {
+			continue
+		}
+		matchedCalls[item] = true
+		if opts.IncludeOutput {
+			appendToolOutput(&item.record, pending.result.Content)
+		}
+	}
+
+	items := make([]*call, 0, len(matchedCalls))
+	for item := range matchedCalls {
+		items = append(items, item)
+	}
+	slices.SortFunc(items, func(a, b *call) int {
+		if a.record.Timestamp != b.record.Timestamp {
+			if a.record.Timestamp > b.record.Timestamp {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.record.MessageID, b.record.MessageID)
+	})
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
+	if opts.IncludeOutput {
+		for _, item := range items {
+			// A result that matched the query was already attached above. The
+			// forward lookup is only needed when the call itself matched.
+			if item.record.Output != "" {
+				continue
+			}
+			nearby, err := d.toolMessagesAfter(item.record.SessionID, item.record.Timestamp)
+			if err != nil {
+				return nil, err
+			}
+			for _, message := range nearby {
+				for _, result := range message.ToolResults {
+					if item.id == "" || result.ID == item.id {
+						appendToolOutput(&item.record, result.Content)
+					}
+				}
+			}
+		}
+	}
+
+	out := make([]CommandRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.record)
+	}
+	return out, nil
+}
+
+func appendToolOutput(record *CommandRecord, content string) {
+	if content == "" {
+		return
+	}
+	if record.Output != "" {
+		record.Output += "\n"
+	}
+	record.Output += content
+}
+
+type toolMessage struct {
+	ID          string
+	SessionID   string
+	Timestamp   int64
+	ToolCalls   []transcript.ToolCall
+	ToolResults []transcript.ToolResult
+}
+
+func (d *DB) toolMessagesBefore(sessionID string, timestamp int64) ([]toolMessage, error) {
+	return d.toolMessages(`m.timestamp <= ? ORDER BY m.timestamp DESC, m.rowid DESC`, sessionID, timestamp)
+}
+
+func (d *DB) toolMessagesAfter(sessionID string, timestamp int64) ([]toolMessage, error) {
+	return d.toolMessages(`m.timestamp >= ? ORDER BY m.timestamp ASC, m.rowid ASC`, sessionID, timestamp)
+}
+
+func (d *DB) toolMessages(order string, sessionID string, timestamp int64) ([]toolMessage, error) {
+	rows, err := d.sql.Query(`SELECT m.id, m.sessionId, m.timestamp, m.toolCalls, m.toolResults
+		FROM messages m WHERE m.sessionId = ? AND (m.toolCalls != '' OR m.toolResults != '') AND `+order+` LIMIT 64`, sessionID, timestamp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []toolMessage{}
+	for rows.Next() {
+		var message toolMessage
+		var calls, results string
+		if err := rows.Scan(&message.ID, &message.SessionID, &message.Timestamp, &calls, &results); err != nil {
+			return nil, err
+		}
+		if calls != "" {
+			_ = json.Unmarshal([]byte(calls), &message.ToolCalls)
+		}
+		if results != "" {
+			_ = json.Unmarshal([]byte(results), &message.ToolResults)
+		}
+		out = append(out, message)
+	}
+	return out, rows.Err()
+}
+
+func messageKey(msg transcript.Message) string { return msg.SessionID + "\x00" + msg.ID }
+
+// ContextMessage is a deduplicated message plus the search hits whose windows
+// caused it to be included.
+type ContextMessage struct {
+	Message transcript.Message
+	HitIDs  []string
+}
+
+// ExpandContext expands selected hits and deduplicates overlapping windows.
+func (d *DB) ExpandContext(hits []transcript.Message, before, after int, proseOnly bool) ([]ContextMessage, error) {
+	byKey := map[string]*ContextMessage{}
+	for _, hit := range hits {
+		messages, err := d.Around(hit.ID, before, after, proseOnly)
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range messages {
+			key := messageKey(message)
+			item := byKey[key]
+			if item == nil {
+				item = &ContextMessage{Message: message}
+				byKey[key] = item
+			}
+			if !slices.Contains(item.HitIDs, hit.ID) {
+				item.HitIDs = append(item.HitIDs, hit.ID)
+			}
+		}
+	}
+	out := make([]ContextMessage, 0, len(byKey))
+	for _, item := range byKey {
+		out = append(out, *item)
+	}
+	slices.SortStableFunc(out, func(a, b ContextMessage) int {
+		if a.Message.SessionID != b.Message.SessionID {
+			return strings.Compare(a.Message.SessionID, b.Message.SessionID)
+		}
+		if a.Message.Timestamp != b.Message.Timestamp {
+			if a.Message.Timestamp < b.Message.Timestamp {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Message.ID, b.Message.ID)
+	})
+	return out, nil
+}
+
+// IndexInfo reports derived-index counts and the transcript files it contains.
+type IndexInfo struct {
+	IndexPath     string
+	SchemaVersion int
+	MessageCount  int
+	SessionCount  int
+	ActivityCount int
+	FileCount     int
+	Sources       []SourceInfo
+	IndexHealthy  bool
+}
+
+type SourceInfo struct {
+	Path         string
+	MessageCount int
+	SessionCount int
+}
+
+// Info returns counts and source paths from the index.
+func (d *DB) Info() (IndexInfo, error) {
+	info := IndexInfo{IndexPath: d.path}
+	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&info.SchemaVersion); err != nil {
+		return info, err
+	}
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&info.MessageCount); err != nil {
+		return info, err
+	}
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&info.SessionCount); err != nil {
+		return info, err
+	}
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM activities`).Scan(&info.ActivityCount); err != nil {
+		return info, err
+	}
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&info.FileCount); err != nil {
+		return info, err
+	}
+	rows, err := d.sql.Query(`SELECT f.path, COUNT(m.id),
+			(SELECT COUNT(*) FROM sessions s WHERE s.sourcePath = f.path)
+		FROM files f LEFT JOIN messages m ON m.sourcePath = f.path
+		GROUP BY f.path ORDER BY f.path`)
+	if err != nil {
+		return info, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var source SourceInfo
+		if err := rows.Scan(&source.Path, &source.MessageCount, &source.SessionCount); err != nil {
+			return info, err
+		}
+		info.Sources = append(info.Sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return info, err
+	}
+	// Opening the database and completing the count queries above provide a
+	// cheap operational check. The full integrity scan belongs to `doctor`.
+	info.IndexHealthy = true
+	return info, nil
+}
+
+// Check runs SQLite's lightweight integrity check.
+func (d *DB) Check() error {
+	var result string
+	if err := d.sql.QueryRow(`PRAGMA quick_check`).Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("index integrity check: %s", result)
+	}
+	return nil
+}
 
 // ErrNoSuchID and ErrAmbiguousID report why a message address did not resolve.
 var (

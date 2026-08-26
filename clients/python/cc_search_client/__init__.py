@@ -144,6 +144,78 @@ class CcSearchClient:
             "budget": budget,
         })
 
+    def sessions(
+        self,
+        pattern: str | None = None,
+        *,
+        limit: int | None = None,
+        cwd: str | None = None,
+        any: bool | None = None,
+    ) -> JsonObject:
+        return self._request("GET", "/v1/sessions", {
+            "pattern": pattern, "limit": limit, "cwd": cwd, "any": any,
+        })
+
+    def activities(
+        self,
+        *,
+        session: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        full: bool | None = None,
+    ) -> JsonObject:
+        return self._request("GET", "/v1/activities", {
+            "session": session, "status": status, "limit": limit, "full": full,
+        })
+
+    def activity(self, activity_id: str, *, full: bool | None = None) -> JsonObject:
+        return self._request("GET", "/v1/activity", {"id": activity_id, "full": full})
+
+    def context(
+        self,
+        pattern: str,
+        *,
+        hits: int | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        session: str | None = None,
+        message_type: str | None = None,
+        include_current: bool | None = None,
+        any: bool | None = None,
+        raw: bool | None = None,
+        all: bool | None = None,
+        full: bool | None = None,
+        preview_length: int | None = None,
+        budget: int | None = None,
+    ) -> JsonObject:
+        return self._request("GET", "/v1/context", {
+            "pattern": pattern, "hits": hits, "before": before, "after": after,
+            "session": session, "type": message_type, "include_current": include_current,
+            "any": any, "raw": raw, "all": all, "full": full,
+            "preview_length": preview_length, "budget": budget,
+        })
+
+    def commands(
+        self,
+        pattern: str,
+        *,
+        tool: str | None = None,
+        session: str | None = None,
+        limit: int | None = None,
+        full: bool | None = None,
+        include_output: bool | None = None,
+    ) -> JsonObject:
+        return self._request("GET", "/v1/commands", {
+            "pattern": pattern, "tool": tool, "session": session, "limit": limit,
+            "full": full, "include_output": include_output,
+        })
+
+    def info(self) -> JsonObject:
+        return self._request("GET", "/v1/info")
+
+    def doctor(self) -> JsonObject:
+        return self._request("GET", "/v1/doctor")
+
     def rebuild(self, session: str | None = None) -> JsonObject:
         return self._request("POST", "/v1/rebuild", {"session": session})
 

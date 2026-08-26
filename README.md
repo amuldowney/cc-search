@@ -73,6 +73,26 @@ cc-search search '("caddy" OR "pihole") NOT "proxy"' --raw   # boolean logic
 # read a hit in context (id, or any unique prefix, from a search result)
 cc-search read 36b182bb --before 3 --after 3
 
+# browse and resume an earlier session
+cc-search sessions "deploy system" --limit 10
+cc-search sessions --cwd /home/andrew/Projects/pi-remote
+
+# inspect Pi subagent work
+cc-search activities --session SESSION_ID
+cc-search activities --status failed
+cc-search activity ACTIVITY_ID --full
+
+# search several hits and expand their surrounding windows
+cc-search context "artifact-first deploy" --hits 3 --before 3 --after 8 --all
+
+# recover an exact historical tool invocation (and its output)
+cc-search commands "no such table" --tool Bash --full
+cc-search commands "docker compose" --session SESSION_ID
+
+# index and installation diagnostics
+cc-search info
+cc-search doctor
+
 # index maintenance (rarely needed — sync is automatic)
 cc-search rebuild
 cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
@@ -107,6 +127,12 @@ raw query is never relaxed, since it says exactly what was meant.
 returns it with its neighbours from the same session, oldest first. That is how
 you recover *why* something was decided rather than just the sentence that
 decided it.
+
+- `sessions` returns compact resumable-session rows with the working directory, visibility, parent session, last message, and message count. A query matches session prose; `--cwd` filters by exact working directory.
+- `activities` and `activity` expose durable Pi activity records, including parent/child session links and terminal status. `activity ID --full` adds marker/linkage fields.
+- `context` keeps selected search hits in relevance order, then returns one deduplicated chronological expansion. Each expanded message has `hitIds`, and the top-level `query` preserves why the context was collected.
+- `commands` searches full content but returns normalized tool name, structured arguments, source session/message id, and timestamp. `--full` or `--include-output` pairs the invocation with its recorded result.
+- `info` reports schema and indexed-source counts, executable identity, current session, and health. `doctor` adds named checks and reports `ok`.
 
 Output is capped at 60,000 characters by default (`--budget N`, `0` disables),
 and the cap *shapes* the result set rather than just chopping its tail:
@@ -186,5 +212,6 @@ build is discarded and rebuilt on open rather than migrated.
 
 The index is larger than the design's 1 MB estimate because tool results — file
 dumps, command output — dominate the corpus. It is fully derived from the
-transcripts and can be deleted at any time; a corrupt index is detected on open
-and rebuilt automatically.
+transcripts and can be deleted at any time; schema/obvious database corruption
+is detected on open and rebuilt automatically. The full integrity scan is
+available through `cc-search doctor` rather than running before every query.

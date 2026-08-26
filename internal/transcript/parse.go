@@ -19,6 +19,12 @@ type Message struct {
 	Prose     string // just what was said: text blocks, no tool calls or results
 	CharCount int
 
+	// ToolCalls and ToolResults retain the structured tool records that are
+	// otherwise flattened into Content. They let command history pair an exact
+	// invocation with its output without reparsing the source transcript.
+	ToolCalls   []ToolCall
+	ToolResults []ToolResult
+
 	// ActivityID and ActivityRole link parent-session Agent rows and child
 	// session messages without turning activity metadata into fake messages.
 	ActivityID       string
@@ -35,6 +41,21 @@ type Session struct {
 	ParentSession string
 	CWD           string
 	Visibility    string
+}
+
+// ToolCall is one structured tool invocation in a message.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// ToolResult is the output belonging to a tool invocation.
+type ToolResult struct {
+	ID      string
+	Name    string
+	Content string
+	IsError bool
 }
 
 // ActivityEvent is a durable pi activity marker from a parent session.
@@ -82,9 +103,11 @@ type record struct {
 	Content       json.RawMessage `json:"content"` // system/custom_message records
 	Details       json.RawMessage `json:"details"`
 	Message       *struct {
-		Role    string          `json:"role"` // pi records
-		Content json.RawMessage `json:"content"`
-		Details json.RawMessage `json:"details"`
+		Role       string          `json:"role"` // pi records
+		Content    json.RawMessage `json:"content"`
+		Details    json.RawMessage `json:"details"`
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
 	} `json:"message"`
 }
 
@@ -94,9 +117,12 @@ type block struct {
 	Text      string          `json:"text"`
 	Thinking  string          `json:"thinking"`
 	Name      string          `json:"name"`
+	ID        string          `json:"id"`
+	ToolUseID string          `json:"tool_use_id"`
 	Input     json.RawMessage `json:"input"`
 	Arguments json.RawMessage `json:"arguments"` // pi toolCall payload
 	Content   json.RawMessage `json:"content"`   // tool_result payload
+	IsError   bool            `json:"is_error"`
 }
 
 // Parser extracts Messages from the lines of one transcript file. It is
@@ -140,6 +166,12 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 			Visibility:    rec.Visibility,
 		}
 		return Message{}, false
+	}
+	if p.session.ID == "" && rec.SessionID != "" {
+		p.session.ID = rec.SessionID
+	}
+	if p.session.CWD == "" && rec.CWD != "" {
+		p.session.CWD = rec.CWD
 	}
 
 	if event, ok := parseActivityEvent(rec); ok {
@@ -187,7 +219,14 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	if sessionID == "" {
 		sessionID = p.session.ID
 	}
+	if p.session.ID == "" && sessionID != "" {
+		p.session.ID = sessionID
+	}
+	if p.session.CWD == "" && rec.CWD != "" {
+		p.session.CWD = rec.CWD
+	}
 
+	calls, results := extractTools(raw, rec.Message)
 	activityID, activityRole := activityFromDetails(messageDetails,
 		rec.Type == "custom_message" && rec.CustomType == "subagent-notification")
 	return Message{
@@ -199,12 +238,65 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 		Content:      content,
 		Prose:        prose,
 		CharCount:    len(content),
+		ToolCalls:    calls,
+		ToolResults:  results,
 		ActivityID:   activityID,
 		ActivityRole: activityRole,
 	}, true
 }
 
+func extractTools(raw json.RawMessage, message *struct {
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	Details    json.RawMessage `json:"details"`
+	ToolCallID string          `json:"toolCallId"`
+	ToolName   string          `json:"toolName"`
+}) ([]ToolCall, []ToolResult) {
+	var calls []ToolCall
+	var results []ToolResult
+	var blocks []block
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		for _, b := range blocks {
+			switch b.Type {
+			case "tool_use", "toolCall":
+				args := b.Input
+				if len(args) == 0 {
+					args = b.Arguments
+				}
+				calls = append(calls, ToolCall{
+					ID: firstNonEmpty(b.ID, b.ToolUseID), Name: b.Name, Arguments: string(args),
+				})
+			case "tool_result":
+				results = append(results, ToolResult{
+					ID: b.ToolUseID, Content: extractContent(b.Content), IsError: b.IsError,
+				})
+			}
+		}
+	}
+	if message != nil && message.Role == "toolResult" &&
+		(message.ToolCallID != "" || message.ToolName != "") {
+		// Pi stores result metadata beside its text content rather than in a
+		// tool_result block.
+		results = append(results, ToolResult{
+			ID: message.ToolCallID, Name: message.ToolName, Content: extractContent(raw),
+		})
+	}
+	return calls, results
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func parseActivityEvent(rec record) (ActivityEvent, bool) {
+	if event, ok := parseTaskNotification(rec); ok {
+		return event, true
+	}
 	if rec.Type != "custom" {
 		return ActivityEvent{}, false
 	}
@@ -265,6 +357,57 @@ func parseActivityEvent(rec record) (ActivityEvent, bool) {
 		ResultSummary:    data.ResultSummary,
 		ToolUses:         data.ToolUses,
 	}, true
+}
+
+func parseTaskNotification(rec record) (ActivityEvent, bool) {
+	if rec.Type != "queue-operation" && rec.Type != "user" && rec.Type != "custom_message" {
+		return ActivityEvent{}, false
+	}
+	raw := rec.Content
+	if rec.Message != nil {
+		raw = rec.Message.Content
+	}
+	text := extractContent(raw)
+	if !strings.Contains(text, "<task-notification>") {
+		return ActivityEvent{}, false
+	}
+	taskID := taskTag(text, "task-id")
+	if taskID == "" {
+		return ActivityEvent{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, rec.Timestamp)
+	if err != nil {
+		return ActivityEvent{}, false
+	}
+	status := taskTag(text, "status")
+	if status == "" {
+		status = "running"
+	}
+	completed := int64(0)
+	if status != "running" {
+		completed = ts.UnixMilli()
+	}
+	summary := taskTag(text, "summary")
+	return ActivityEvent{
+		Kind: "task-notification", EntryID: firstNonEmpty(rec.UUID, rec.ID, taskID),
+		ParentID: rec.ParentID, Timestamp: ts.UnixMilli(), ActivityID: taskID,
+		Status: status, StartedAt: ts.UnixMilli(), CompletedAt: completed,
+		Title: summary, Description: taskTag(text, "output-file"),
+		ActivityKind: "task", Namespace: "claude", ResultSummary: summary,
+	}, true
+}
+
+func taskTag(text, name string) string {
+	start := strings.Index(text, "<"+name+">")
+	if start < 0 {
+		return ""
+	}
+	start += len(name) + 2
+	end := strings.Index(text[start:], "</"+name+">")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[start : start+end])
 }
 
 func activityFromDetails(raw json.RawMessage, allowGenericID bool) (string, string) {

@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/andrewmuldowney/cc-search/internal/index"
 	"github.com/andrewmuldowney/cc-search/internal/output"
@@ -50,6 +52,13 @@ commands:
                                         most recent messages (default N=10)
   search PATTERN [options]              full-text search across transcripts
   read ID [--before N] [--after N]      one message plus its neighbours
+  sessions [QUERY] [options]             browse sessions to resume
+  activities [options]                   inspect subagent activity records
+  activity ID [--full]                  inspect one subagent activity
+  context PATTERN [options]             search hits with surrounding context
+  commands PATTERN [options]            retrieve exact historical tool calls
+  info                                  show index and installation details
+  doctor                                check index and installation health
   rebuild [--session ID]                discard and rebuild the index
   serve [--host 127.0.0.1] [--port N]  serve the local OpenAPI HTTP API
        [--index PATH] [--transcripts DIR]
@@ -70,7 +79,30 @@ read options:
   --after N             messages of context after it (default 5)
   ID may be any unique prefix of a message id, as returned by search.
 
-output options (last, search and read):
+sessions options:
+  --limit N             maximum sessions returned (default 20)
+  --cwd PATH            exact working-directory filter
+  --any                match any query term instead of all terms
+
+activities options:
+  --session ID          parent or child session
+  --status STATUS       running, completed, failed, ...
+  --limit N             maximum activities returned (default 20)
+  --full                include diagnostic linkage fields
+
+context options:
+  --hits N              number of search hits to expand (default 3)
+  --before N            messages before each hit (default 3)
+  --after N             messages after each hit (default 8)
+
+commands options:
+  --tool NAME           restrict to one tool (for example Bash)
+  --session ID          restrict to one session
+  --limit N             maximum commands returned (default 20; 0 = unlimited)
+  --full                include paired tool output
+  --include-output      include paired tool output (same as --full)
+
+output options (last, search, read and context):
   --all                 include tool calls and their output (default: only
                         what was actually said)
   --preview-length N    preview size in characters (default 100)
@@ -120,6 +152,20 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 		err = runSearch(rest, cfg, stdout, stderr)
 	case "read":
 		err = runRead(rest, cfg, stdout, stderr)
+	case "sessions":
+		err = runSessions(rest, cfg, stdout, stderr)
+	case "activities":
+		err = runActivities(rest, cfg, stdout, stderr)
+	case "activity":
+		err = runActivity(rest, cfg, stdout, stderr)
+	case "context":
+		err = runContext(rest, cfg, stdout, stderr)
+	case "commands":
+		err = runCommands(rest, cfg, stdout, stderr)
+	case "info":
+		err = runInfo(rest, cfg, stdout, stderr)
+	case "doctor":
+		err = runDoctor(rest, cfg, stdout, stderr)
 	case "rebuild":
 		err = runRebuild(rest, cfg, stdout, stderr)
 	case "serve":
@@ -354,6 +400,390 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	opts := f.outputOptions(truncated)
 	opts.Relaxed = relaxed
 	return emit(stdout, stderr, msgs, opts)
+}
+
+const (
+	defaultSessionLimit  = 20
+	defaultActivityLimit = 20
+	defaultContextHits   = 3
+	defaultCommandLimit  = 20
+)
+
+func runSessions(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("sessions", stderr)
+	limit := f.set.Int("limit", defaultSessionLimit, "maximum sessions returned")
+	cwd := f.set.String("cwd", "", "exact working-directory filter")
+	any := f.set.Bool("any", false, "match any query term")
+	pattern := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		pattern, args = args[0], args[1:]
+	}
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	if *limit < 0 {
+		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
+	}
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+
+	rows, err := db.Sessions(index.SessionOptions{Query: pattern, Limit: *limit, CWD: *cwd, Any: *any})
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 && pattern != "" && !*any && index.TermCount(pattern) > 1 {
+		rows, err = db.Sessions(index.SessionOptions{Query: pattern, Limit: *limit, CWD: *cwd, Any: true})
+		if err != nil {
+			return err
+		}
+	}
+	response := output.SessionsResponse{Sessions: make([]output.Session, 0, len(rows)), Total: len(rows)}
+	for _, row := range rows {
+		response.Sessions = append(response.Sessions, output.Session{
+			SessionID: row.SessionID, CWD: row.CWD, Visibility: row.Visibility,
+			ParentSessionID: row.ParentSessionID, LastTimestamp: formatTimestamp(row.LastTimestamp),
+			LastPreview: compactPreview(row.LastPreview), MessageCount: row.MessageCount,
+		})
+	}
+	return writeJSONLine(stdout, response)
+}
+
+func runActivities(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("activities", stderr)
+	status := f.set.String("status", "", "activity status")
+	limit := f.set.Int("limit", defaultActivityLimit, "maximum activities returned")
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	if *limit < 0 {
+		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
+	}
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+	rows, err := db.Activities(index.ActivityOptions{SessionID: f.session, Status: *status, Limit: *limit})
+	if err != nil {
+		return err
+	}
+	activities := make([]output.Activity, 0, len(rows))
+	for _, row := range rows {
+		activities = append(activities, activityOutput(row, f.full))
+	}
+	return writeJSONLine(stdout, output.ActivitiesResponse{Activities: activities, Total: len(activities)})
+}
+
+func runActivity(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("activity", stderr)
+	if len(args) == 0 {
+		return fmt.Errorf("%w: activity needs an activity id", errUsage)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("%w: the activity id must come before the flags, got %q", errUsage, args[0])
+	}
+	id, args := args[0], args[1:]
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+	row, err := db.Activity(id)
+	if err != nil {
+		return err
+	}
+	return writeJSONLine(stdout, activityOutput(row, f.full))
+}
+
+func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("context", stderr)
+	hits := f.set.Int("hits", defaultContextHits, "number of search hits to expand")
+	before := f.set.Int("before", 3, "messages before each hit")
+	after := f.set.Int("after", 8, "messages after each hit")
+	any := f.set.Bool("any", false, "match any term")
+	raw := f.set.Bool("raw", false, "pass the pattern to FTS5 as a boolean expression")
+	msgType := f.set.String("type", "", "restrict to a message type")
+	includeCurrent := f.set.Bool("include-current", false, "include the current session")
+	if len(args) == 0 {
+		return fmt.Errorf("%w: context needs a pattern", errUsage)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("%w: the context pattern must come before the flags, got %q", errUsage, args[0])
+	}
+	pattern, args := args[0], args[1:]
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	if *hits < 0 || *before < 0 || *after < 0 {
+		return fmt.Errorf("%w: --hits, --before and --after must be non-negative", errUsage)
+	}
+	if *raw && *any {
+		return fmt.Errorf("%w: --any has no meaning for a --raw query; write OR yourself", errUsage)
+	}
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+
+	queryLimit := *hits
+	if queryLimit > 0 {
+		queryLimit++
+	}
+	excludeSession := ""
+	if f.session == "" && !*includeCurrent {
+		excludeSession = currentSessionID()
+	}
+	search := index.SearchOptions{Query: pattern, Limit: queryLimit, SessionID: f.session,
+		ExcludeSessionID: excludeSession, Type: *msgType,
+		ProseOnly: !f.all, Any: *any, Raw: *raw}
+	selected, err := db.Search(search)
+	if err != nil {
+		if errors.Is(err, index.ErrBadQuery) {
+			return fmt.Errorf("%w: %w", errUsage, err)
+		}
+		return err
+	}
+	relaxed := false
+	if len(selected) == 0 && !*any && !*raw && index.TermCount(pattern) > 1 {
+		search.Any = true
+		selected, err = db.Search(search)
+		if err != nil {
+			return err
+		}
+		relaxed = len(selected) > 0
+	}
+	truncated := *hits > 0 && len(selected) > *hits
+	if truncated {
+		selected = selected[:*hits]
+	}
+	if relaxed {
+		fmt.Fprintf(stderr, "cc-search: no message contained every term; relaxed to any term (%d results). These are related, not exact.\n", len(selected))
+	}
+
+	expanded, err := db.ExpandContext(selected, *before, *after, !f.all)
+	if err != nil {
+		return err
+	}
+	contextMessages := make([]transcript.Message, 0, len(expanded))
+	for _, item := range expanded {
+		contextMessages = append(contextMessages, item.Message)
+	}
+	contextOptions := f.outputOptions(truncated)
+	contextOptions.Relaxed = relaxed
+	contextResponse := output.Format(contextMessages, contextOptions)
+	hitOptions := f.outputOptions(truncated)
+	hitOptions.Budget = 0
+	hitResponse := output.Format(selected, hitOptions)
+	results := make([]output.ContextResult, 0, len(contextResponse.Results))
+	for i, result := range contextResponse.Results {
+		results = append(results, output.ContextResult{Result: result, HitIDs: expanded[i].HitIDs})
+	}
+	response := output.ContextResponse{Query: pattern, Hits: hitResponse.Results, Results: results,
+		TotalHits: len(selected), Total: len(results), Truncated: contextResponse.Truncated,
+		Relaxed: relaxed, Budget: contextResponse.Budget}
+	if response.Budget.Dropped > 0 {
+		fmt.Fprintf(stderr, "cc-search: warning: the %d character budget dropped %d context messages (%d spent); raise or disable it with --budget\n", response.Budget.Limit, response.Budget.Dropped, response.Budget.Spent)
+	} else if response.Budget.Shrunk {
+		fmt.Fprintf(stderr, "cc-search: warning: context previews were shortened to fit the %d character budget (%d spent); raise or disable it with --budget\n", response.Budget.Limit, response.Budget.Spent)
+	}
+	return writeJSONLine(stdout, response)
+}
+
+func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("commands", stderr)
+	tool := f.set.String("tool", "", "restrict to one tool")
+	limit := f.set.Int("limit", defaultCommandLimit, "maximum commands returned (0 = unlimited)")
+	includeOutput := f.set.Bool("include-output", false, "include paired tool output")
+	outputFlag := f.set.Bool("output", false, "include paired tool output (alias)")
+	if len(args) == 0 {
+		return fmt.Errorf("%w: commands needs a pattern", errUsage)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("%w: the command pattern must come before the flags, got %q", errUsage, args[0])
+	}
+	pattern, args := args[0], args[1:]
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	if *limit < 0 {
+		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
+	}
+	cfg = f.resolve(cfg)
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+	queryLimit := *limit
+	if queryLimit > 0 {
+		queryLimit++
+	}
+	rows, err := db.Commands(index.CommandOptions{Query: pattern, Tool: *tool, SessionID: f.session, Limit: queryLimit, IncludeOutput: f.full || *includeOutput || *outputFlag})
+	if err != nil {
+		return err
+	}
+	truncated := *limit > 0 && len(rows) > *limit
+	if truncated {
+		rows = rows[:*limit]
+	}
+	commands := make([]output.Command, 0, len(rows))
+	for _, row := range rows {
+		commands = append(commands, output.Command{Tool: row.Tool, Arguments: commandArguments(row.Arguments), SessionID: row.SessionID, MessageID: row.MessageID, Timestamp: formatTimestamp(row.Timestamp), Output: row.Output})
+	}
+	return writeJSONLine(stdout, output.CommandsResponse{Commands: commands, Total: len(commands), Truncated: truncated})
+}
+
+func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("info", stderr)
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	cfg = f.resolve(cfg)
+	info, err := diagnosticInfo(cfg, stderr, false)
+	if err != nil {
+		return err
+	}
+	return writeJSONLine(stdout, info)
+}
+
+func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	f := newFlagSet("doctor", stderr)
+	if err := f.set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if f.set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	cfg = f.resolve(cfg)
+	info, err := diagnosticInfo(cfg, stderr, true)
+	if err != nil {
+		return err
+	}
+	checks := []output.DoctorCheck{
+		{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath},
+		{Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)},
+		{Name: "lock", OK: info.LockHealthy, Detail: "lifecycle lock acquired"},
+	}
+	ok := true
+	for _, check := range checks {
+		ok = ok && check.OK
+	}
+	if err := writeJSONLine(stdout, output.DoctorResponse{InfoResponse: info, OK: ok, Checks: checks}); err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("doctor found an unhealthy index")
+	}
+	return nil
+}
+
+func diagnosticInfo(cfg Config, stderr io.Writer, verify bool) (info output.InfoResponse, err error) {
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return info, err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+	stats, err := db.Info()
+	if err != nil {
+		return info, err
+	}
+	if verify {
+		stats.IndexHealthy = db.Check() == nil
+	}
+	binaryPath, _ := os.Executable()
+	if resolved, resolveErr := filepath.EvalSymlinks(binaryPath); resolveErr == nil {
+		binaryPath = resolved
+	}
+	binaryVersion := "dev"
+	if build, ok := debug.ReadBuildInfo(); ok && build.Main.Version != "" && build.Main.Version != "(devel)" {
+		binaryVersion = build.Main.Version
+	}
+	info = output.InfoResponse{IndexPath: stats.IndexPath, SchemaVersion: stats.SchemaVersion,
+		MessageCount: stats.MessageCount, SessionCount: stats.SessionCount, ActivityCount: stats.ActivityCount,
+		FileCount: stats.FileCount, Sources: make([]output.Source, 0, len(stats.Sources)),
+		BinaryPath: binaryPath, BinaryVersion: binaryVersion, CurrentSession: currentSessionID(),
+		IndexHealthy: stats.IndexHealthy, LockHealthy: true}
+	for _, source := range stats.Sources {
+		info.Sources = append(info.Sources, output.Source{Path: source.Path, MessageCount: source.MessageCount, SessionCount: source.SessionCount})
+	}
+	return info, nil
+}
+
+func activityOutput(row index.ActivityRecord, full bool) output.Activity {
+	activity := output.Activity{ActivityID: row.ActivityID, Status: row.Status, Title: row.Title, Model: row.Model,
+		Effort: row.Effort, ToolUses: row.ToolUses, StartedAt: formatTimestamp(row.StartedAt), CompletedAt: formatTimestamp(row.CompletedAt),
+		ParentSessionID: row.ParentSessionID, ChildSessionID: row.ChildSessionID, ParentActivityID: row.ParentActivityID, ResultSummary: row.ResultSummary}
+	if full {
+		activity.Description, activity.Kind, activity.Namespace = row.Description, row.Kind, row.Namespace
+		activity.StartEntryID, activity.StartParentID = row.StartEntryID, row.StartParentID
+		activity.LinkedEntryID, activity.TerminalEntryID, activity.TerminalParentID = row.LinkedEntryID, row.TerminalEntryID, row.TerminalParentID
+	}
+	return activity
+}
+
+func commandArguments(raw string) any {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err == nil {
+		return value
+	}
+	return raw
+}
+
+func compactPreview(content string) string {
+	flat := strings.Join(strings.Fields(content), " ")
+	runes := []rune(flat)
+	if len(runes) > output.DefaultPreviewLength {
+		return string(runes[:output.DefaultPreviewLength]) + "…"
+	}
+	return flat
+}
+
+func formatTimestamp(milliseconds int64) string {
+	if milliseconds == 0 {
+		return ""
+	}
+	return time.UnixMilli(milliseconds).UTC().Format(time.RFC3339)
+}
+
+func writeJSONLine(stdout io.Writer, value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(encoded))
+	return err
 }
 
 func runRebuild(args []string, cfg Config, stdout, stderr io.Writer) (err error) {

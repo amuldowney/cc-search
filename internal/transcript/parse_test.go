@@ -68,6 +68,9 @@ func TestParseLineRendersToolUseBlock(t *testing.T) {
 	if msg.Content != want {
 		t.Errorf("Content = %q, want %q", msg.Content, want)
 	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Name != "Bash" || msg.ToolCalls[0].Arguments != `{"command":"ls -la"}` {
+		t.Errorf("ToolCalls = %+v", msg.ToolCalls)
+	}
 }
 
 func TestParseLineExtractsToolResultContent(t *testing.T) {
@@ -83,6 +86,9 @@ func TestParseLineExtractsToolResultContent(t *testing.T) {
 	}
 	if msg.Content != "total 108" {
 		t.Errorf("Content = %q, want %q", msg.Content, "total 108")
+	}
+	if len(msg.ToolResults) != 1 || msg.ToolResults[0].ID != "t1" || msg.ToolResults[0].Content != "total 108" {
+		t.Errorf("ToolResults = %+v", msg.ToolResults)
 	}
 }
 
@@ -306,6 +312,18 @@ func TestParseLineHidesPiToolResultFromProse(t *testing.T) {
 	}
 	if msg.Prose != "" {
 		t.Errorf("Prose = %q, want empty so --all is required to see it", msg.Prose)
+	}
+}
+
+func TestParseTaskNotificationProducesActivityEvent(t *testing.T) {
+	p := new(Parser)
+	line := []byte(`{"type":"queue-operation","operation":"remove","sessionId":"session-a","timestamp":"2026-08-25T03:00:00Z","content":"<task-notification>\n<task-id>task-1</task-id>\n<output-file>/tmp/task.output</output-file>\n<status>failed</status>\n<summary>Agent \"Explore\" stopped</summary>\n</task-notification>"}`)
+	if _, ok := p.ParseLine(line); ok {
+		t.Fatal("task notification should not become a searchable message")
+	}
+	events := p.ActivityEvents()
+	if len(events) != 1 || events[0].ActivityID != "task-1" || events[0].Status != "failed" || events[0].Title != `Agent "Explore" stopped` || events[0].Description != "/tmp/task.output" {
+		t.Fatalf("events = %+v", events)
 	}
 }
 

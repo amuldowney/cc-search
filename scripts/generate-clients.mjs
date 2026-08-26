@@ -9,7 +9,7 @@ const specPath = resolve(root, "openapi/cc-search.json");
 const spec = JSON.parse(readFileSync(specPath, "utf8"));
 
 if (spec.openapi !== "3.1.0") throw new Error(`expected OpenAPI 3.1.0, got ${spec.openapi}`);
-const requiredPaths = ["/openapi.json", "/v1/health", "/v1/search", "/v1/last", "/v1/read", "/v1/rebuild"];
+const requiredPaths = ["/openapi.json", "/v1/health", "/v1/search", "/v1/last", "/v1/read", "/v1/sessions", "/v1/activities", "/v1/activity", "/v1/context", "/v1/commands", "/v1/info", "/v1/doctor", "/v1/rebuild"];
 for (const path of requiredPaths) {
   if (!spec.paths?.[path]) throw new Error(`spec is missing ${path}`);
 }

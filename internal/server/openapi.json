@@ -50,30 +50,60 @@
       "get": {
         "operationId": "searchMessages",
         "parameters": [
-          { "$ref": "#/components/parameters/Pattern" },
-          { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/WindowMessages" },
-          { "$ref": "#/components/parameters/WindowHours" },
-          { "$ref": "#/components/parameters/Session" },
-          { "$ref": "#/components/parameters/Type" },
-          { "$ref": "#/components/parameters/IncludeCurrent" },
-          { "$ref": "#/components/parameters/Any" },
-          { "$ref": "#/components/parameters/Raw" },
-          { "$ref": "#/components/parameters/All" },
-          { "$ref": "#/components/parameters/Full" },
-          { "$ref": "#/components/parameters/PreviewLength" },
-          { "$ref": "#/components/parameters/Budget" }
+          {
+            "$ref": "#/components/parameters/Pattern"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/WindowMessages"
+          },
+          {
+            "$ref": "#/components/parameters/WindowHours"
+          },
+          {
+            "$ref": "#/components/parameters/Session"
+          },
+          {
+            "$ref": "#/components/parameters/Type"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeCurrent"
+          },
+          {
+            "$ref": "#/components/parameters/Any"
+          },
+          {
+            "$ref": "#/components/parameters/Raw"
+          },
+          {
+            "$ref": "#/components/parameters/All"
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/PreviewLength"
+          },
+          {
+            "$ref": "#/components/parameters/Budget"
+          }
         ],
         "responses": {
           "200": {
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/InvalidInput" }
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
         }
       }
     },
@@ -81,25 +111,45 @@
       "get": {
         "operationId": "getLastMessages",
         "parameters": [
-          { "$ref": "#/components/parameters/Count" },
-          { "$ref": "#/components/parameters/Hours" },
-          { "$ref": "#/components/parameters/Session" },
-          { "$ref": "#/components/parameters/Type" },
-          { "$ref": "#/components/parameters/All" },
-          { "$ref": "#/components/parameters/Full" },
-          { "$ref": "#/components/parameters/PreviewLength" },
-          { "$ref": "#/components/parameters/Budget" }
+          {
+            "$ref": "#/components/parameters/Count"
+          },
+          {
+            "$ref": "#/components/parameters/Hours"
+          },
+          {
+            "$ref": "#/components/parameters/Session"
+          },
+          {
+            "$ref": "#/components/parameters/Type"
+          },
+          {
+            "$ref": "#/components/parameters/All"
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/PreviewLength"
+          },
+          {
+            "$ref": "#/components/parameters/Budget"
+          }
         ],
         "responses": {
           "200": {
             "description": "Recent messages",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/InvalidInput" }
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
         }
       }
     },
@@ -107,26 +157,48 @@
       "get": {
         "operationId": "readMessageContext",
         "parameters": [
-          { "$ref": "#/components/parameters/Id" },
-          { "$ref": "#/components/parameters/Before" },
-          { "$ref": "#/components/parameters/After" },
-          { "$ref": "#/components/parameters/All" },
-          { "$ref": "#/components/parameters/Full" },
-          { "$ref": "#/components/parameters/PreviewLength" },
-          { "$ref": "#/components/parameters/Budget" }
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          },
+          {
+            "$ref": "#/components/parameters/After"
+          },
+          {
+            "$ref": "#/components/parameters/All"
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/PreviewLength"
+          },
+          {
+            "$ref": "#/components/parameters/Budget"
+          }
         ],
         "responses": {
           "200": {
             "description": "Message with neighboring context",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/InvalidInput" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" }
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
         }
       }
     },
@@ -134,126 +206,1066 @@
       "post": {
         "operationId": "rebuildIndex",
         "parameters": [
-          { "$ref": "#/components/parameters/Session" }
+          {
+            "$ref": "#/components/parameters/Session"
+          }
         ],
         "responses": {
           "200": {
             "description": "Rebuild statistics",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RebuildResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "parameters": [
+          {
+            "name": "pattern",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20
+            }
+          },
+          {
+            "name": "cwd",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Any"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
+        }
+      }
+    },
+    "/v1/activities": {
+      "get": {
+        "operationId": "listActivities",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Session"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Activity summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivitiesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
+        }
+      }
+    },
+    "/v1/activity": {
+      "get": {
+        "operationId": "getActivity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Activity details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Activity"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/context": {
+      "get": {
+        "operationId": "getContext",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Pattern"
+          },
+          {
+            "name": "hits",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          },
+          {
+            "$ref": "#/components/parameters/After"
+          },
+          {
+            "$ref": "#/components/parameters/Session"
+          },
+          {
+            "$ref": "#/components/parameters/Type"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeCurrent"
+          },
+          {
+            "$ref": "#/components/parameters/Any"
+          },
+          {
+            "$ref": "#/components/parameters/Raw"
+          },
+          {
+            "$ref": "#/components/parameters/All"
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/PreviewLength"
+          },
+          {
+            "$ref": "#/components/parameters/Budget"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search hits and deduplicated context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
+        }
+      }
+    },
+    "/v1/commands": {
+      "get": {
+        "operationId": "searchCommands",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Pattern"
+          },
+          {
+            "name": "tool",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Session"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Full"
+          },
+          {
+            "name": "include_output",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Historical tool invocations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidInput"
+          }
+        }
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "operationId": "getInfo",
+        "responses": {
+          "200": {
+            "description": "Index and installation information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InfoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/doctor": {
+      "get": {
+        "operationId": "getDoctor",
+        "responses": {
+          "200": {
+            "description": "Index and installation health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoctorResponse"
+                }
+              }
+            }
+          }
         }
       }
     }
   },
   "components": {
     "parameters": {
-      "Pattern": { "name": "pattern", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1 } },
-      "Id": { "name": "id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1 } },
-      "Session": { "name": "session", "in": "query", "schema": { "type": "string" } },
-      "Type": { "name": "type", "in": "query", "schema": { "type": "string" } },
-      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
-      "Count": { "name": "count", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 10 } },
-      "Hours": { "name": "hours", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
-      "WindowMessages": { "name": "window_messages", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
-      "WindowHours": { "name": "window_hours", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
-      "Before": { "name": "before", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 5 } },
-      "After": { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 5 } },
-      "PreviewLength": { "name": "preview_length", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 100 } },
-      "Budget": { "name": "budget", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 60000 } },
-      "All": { "name": "all", "in": "query", "schema": { "type": "boolean", "default": false } },
-      "Full": { "name": "full", "in": "query", "schema": { "type": "boolean", "default": false } },
-      "Any": { "name": "any", "in": "query", "schema": { "type": "boolean", "default": false } },
-      "Raw": { "name": "raw", "in": "query", "schema": { "type": "boolean", "default": false } },
-      "IncludeCurrent": { "name": "include_current", "in": "query", "schema": { "type": "boolean", "default": false } }
+      "Pattern": {
+        "name": "pattern",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "Id": {
+        "name": "id",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "Session": {
+        "name": "session",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Type": {
+        "name": "type",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "Count": {
+        "name": "count",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10
+        }
+      },
+      "Hours": {
+        "name": "hours",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "WindowMessages": {
+        "name": "window_messages",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "WindowHours": {
+        "name": "window_hours",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "Before": {
+        "name": "before",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5
+        }
+      },
+      "After": {
+        "name": "after",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5
+        }
+      },
+      "PreviewLength": {
+        "name": "preview_length",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100
+        }
+      },
+      "Budget": {
+        "name": "budget",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 60000
+        }
+      },
+      "All": {
+        "name": "all",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "Full": {
+        "name": "full",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "Any": {
+        "name": "any",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "Raw": {
+        "name": "raw",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "IncludeCurrent": {
+        "name": "include_current",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      }
     },
     "responses": {
       "InvalidInput": {
         "description": "Request is invalid",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "NotFound": {
         "description": "Message was not found",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "Conflict": {
         "description": "Message ID is ambiguous",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "InternalError": {
         "description": "The service could not complete the request",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     },
     "schemas": {
       "Health": {
         "type": "object",
-        "required": ["version", "status"],
-        "properties": { "version": { "type": "integer" }, "status": { "type": "string", "const": "ok" } }
+        "required": [
+          "version",
+          "status"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "const": "ok"
+          }
+        }
       },
       "Message": {
         "type": "object",
-        "required": ["id", "sessionId", "timestamp", "type", "charCount"],
+        "required": [
+          "id",
+          "sessionId",
+          "timestamp",
+          "type",
+          "charCount"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "sessionId": { "type": "string" },
-          "timestamp": { "type": "string", "format": "date-time" },
-          "type": { "type": "string" },
-          "activityId": { "type": "string" },
-          "activityRole": { "type": "string", "enum": ["start", "response", "terminal", "child"] },
-          "parentActivityId": { "type": "string" },
-          "parentSessionId": { "type": "string" },
-          "childSessionId": { "type": "string" },
-          "preview": { "type": "string" },
-          "content": { "type": "string" },
-          "charCount": { "type": "integer" }
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "type": {
+            "type": "string"
+          },
+          "activityId": {
+            "type": "string"
+          },
+          "activityRole": {
+            "type": "string",
+            "enum": [
+              "start",
+              "response",
+              "terminal",
+              "child"
+            ]
+          },
+          "parentActivityId": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "childSessionId": {
+            "type": "string"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "charCount": {
+            "type": "integer"
+          }
         }
       },
       "Budget": {
         "type": "object",
-        "required": ["limit", "spent", "dropped", "shrunk"],
+        "required": [
+          "limit",
+          "spent",
+          "dropped",
+          "shrunk"
+        ],
         "properties": {
-          "limit": { "type": "integer" },
-          "spent": { "type": "integer" },
-          "dropped": { "type": "integer" },
-          "shrunk": { "type": "boolean" }
+          "limit": {
+            "type": "integer"
+          },
+          "spent": {
+            "type": "integer"
+          },
+          "dropped": {
+            "type": "integer"
+          },
+          "shrunk": {
+            "type": "boolean"
+          }
         }
       },
       "MessageResponse": {
         "type": "object",
-        "required": ["results", "total", "truncated", "relaxed", "budget"],
+        "required": [
+          "results",
+          "total",
+          "truncated",
+          "relaxed",
+          "budget"
+        ],
         "properties": {
-          "results": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } },
-          "total": { "type": "integer" },
-          "truncated": { "type": "boolean" },
-          "relaxed": { "type": "boolean" },
-          "budget": { "$ref": "#/components/schemas/Budget" }
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "relaxed": {
+            "type": "boolean"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/Budget"
+          }
         }
       },
       "RebuildResponse": {
         "type": "object",
-        "required": ["version", "sessionsIndexed", "messagesIndexed", "filesSkipped"],
+        "required": [
+          "version",
+          "sessionsIndexed",
+          "messagesIndexed",
+          "filesSkipped"
+        ],
         "properties": {
-          "version": { "type": "integer" },
-          "sessionsIndexed": { "type": "integer" },
-          "messagesIndexed": { "type": "integer" },
-          "filesSkipped": { "type": "integer" }
+          "version": {
+            "type": "integer"
+          },
+          "sessionsIndexed": {
+            "type": "integer"
+          },
+          "messagesIndexed": {
+            "type": "integer"
+          },
+          "filesSkipped": {
+            "type": "integer"
+          }
         }
       },
       "Error": {
         "type": "object",
-        "required": ["version", "error", "code"],
+        "required": [
+          "version",
+          "error",
+          "code"
+        ],
         "properties": {
-          "version": { "type": "integer" },
-          "error": { "type": "string" },
-          "code": { "type": "string" }
+          "version": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
         }
       },
-      "OpenApiDocument": { "type": "object", "additionalProperties": true }
+      "OpenApiDocument": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "cwd",
+          "visibility",
+          "parentSessionId",
+          "lastTimestamp",
+          "lastPreview",
+          "messageCount"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "lastTimestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastPreview": {
+            "type": "string"
+          },
+          "messageCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "SessionsResponse": {
+        "type": "object",
+        "required": [
+          "sessions",
+          "total"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "Activity": {
+        "type": "object",
+        "required": [
+          "activityId",
+          "status",
+          "title",
+          "model",
+          "effort",
+          "toolUses",
+          "startedAt",
+          "completedAt",
+          "parentSessionId",
+          "childSessionId",
+          "parentActivityId",
+          "resultSummary"
+        ],
+        "properties": {
+          "activityId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string"
+          },
+          "toolUses": {
+            "type": "integer"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "childSessionId": {
+            "type": "string"
+          },
+          "parentActivityId": {
+            "type": "string"
+          },
+          "resultSummary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "startEntryId": {
+            "type": "string"
+          },
+          "startParentId": {
+            "type": "string"
+          },
+          "linkedEntryId": {
+            "type": "string"
+          },
+          "terminalEntryId": {
+            "type": "string"
+          },
+          "terminalParentId": {
+            "type": "string"
+          }
+        }
+      },
+      "ActivitiesResponse": {
+        "type": "object",
+        "required": [
+          "activities",
+          "total"
+        ],
+        "properties": {
+          "activities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Activity"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "Command": {
+        "type": "object",
+        "required": [
+          "tool",
+          "arguments",
+          "sessionId",
+          "messageId",
+          "timestamp"
+        ],
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "arguments": {},
+          "sessionId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "output": {
+            "type": "string"
+          }
+        }
+      },
+      "CommandsResponse": {
+        "type": "object",
+        "required": [
+          "commands",
+          "total",
+          "truncated"
+        ],
+        "properties": {
+          "commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Command"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ContextResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Message"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hitIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ContextResponse": {
+        "type": "object",
+        "required": [
+          "query",
+          "hits",
+          "results",
+          "totalHits",
+          "total",
+          "truncated",
+          "relaxed",
+          "budget"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContextResult"
+            }
+          },
+          "totalHits": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "relaxed": {
+            "type": "boolean"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/Budget"
+          }
+        }
+      },
+      "Source": {
+        "type": "object",
+        "required": [
+          "path",
+          "messageCount",
+          "sessionCount"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "messageCount": {
+            "type": "integer"
+          },
+          "sessionCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "InfoResponse": {
+        "type": "object",
+        "required": [
+          "indexPath",
+          "schemaVersion",
+          "messageCount",
+          "sessionCount",
+          "activityCount",
+          "fileCount",
+          "sources",
+          "binaryPath",
+          "binaryVersion",
+          "currentSession",
+          "indexHealthy",
+          "lockHealthy"
+        ],
+        "properties": {
+          "indexPath": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "integer"
+          },
+          "messageCount": {
+            "type": "integer"
+          },
+          "sessionCount": {
+            "type": "integer"
+          },
+          "activityCount": {
+            "type": "integer"
+          },
+          "fileCount": {
+            "type": "integer"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            }
+          },
+          "binaryPath": {
+            "type": "string"
+          },
+          "binaryVersion": {
+            "type": "string"
+          },
+          "currentSession": {
+            "type": "string"
+          },
+          "indexHealthy": {
+            "type": "boolean"
+          },
+          "lockHealthy": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DoctorCheck": {
+        "type": "object",
+        "required": [
+          "name",
+          "ok"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "DoctorResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InfoResponse"
+          },
+          {
+            "type": "object",
+            "required": [
+              "ok",
+              "checks"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DoctorCheck"
+                }
+              }
+            }
+          }
+        ]
+      }
     }
   }
 }

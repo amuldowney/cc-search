@@ -37,6 +37,119 @@ type Response struct {
 	Budget  Budget `json:"budget"`
 }
 
+// SessionsResponse is the browse result for the sessions command.
+type SessionsResponse struct {
+	Sessions []Session `json:"sessions"`
+	Total    int       `json:"total"`
+}
+
+type Session struct {
+	SessionID       string `json:"sessionId"`
+	CWD             string `json:"cwd"`
+	Visibility      string `json:"visibility"`
+	ParentSessionID string `json:"parentSessionId"`
+	LastTimestamp   string `json:"lastTimestamp"`
+	LastPreview     string `json:"lastPreview"`
+	MessageCount    int    `json:"messageCount"`
+}
+
+// ActivitiesResponse is the list result for the activities command.
+type ActivitiesResponse struct {
+	Activities []Activity `json:"activities"`
+	Total      int        `json:"total"`
+}
+
+type Activity struct {
+	ActivityID       string `json:"activityId"`
+	Status           string `json:"status"`
+	Title            string `json:"title"`
+	Model            string `json:"model"`
+	Effort           string `json:"effort"`
+	ToolUses         int    `json:"toolUses"`
+	StartedAt        string `json:"startedAt"`
+	CompletedAt      string `json:"completedAt"`
+	ParentSessionID  string `json:"parentSessionId"`
+	ChildSessionID   string `json:"childSessionId"`
+	ParentActivityID string `json:"parentActivityId"`
+	ResultSummary    string `json:"resultSummary"`
+	Description      string `json:"description,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	Namespace        string `json:"namespace,omitempty"`
+	StartEntryID     string `json:"startEntryId,omitempty"`
+	StartParentID    string `json:"startParentId,omitempty"`
+	LinkedEntryID    string `json:"linkedEntryId,omitempty"`
+	TerminalEntryID  string `json:"terminalEntryId,omitempty"`
+	TerminalParentID string `json:"terminalParentId,omitempty"`
+}
+
+// CommandsResponse is the list result for the commands command.
+type CommandsResponse struct {
+	Commands  []Command `json:"commands"`
+	Total     int       `json:"total"`
+	Truncated bool      `json:"truncated"`
+}
+
+type Command struct {
+	Tool      string `json:"tool"`
+	Arguments any    `json:"arguments"`
+	SessionID string `json:"sessionId"`
+	MessageID string `json:"messageId"`
+	Timestamp string `json:"timestamp"`
+	Output    string `json:"output,omitempty"`
+}
+
+// ContextResponse contains the selected search hits and one deduplicated
+// expansion of all of their surrounding windows.
+type ContextResponse struct {
+	Query     string          `json:"query"`
+	Hits      []Result        `json:"hits"`
+	Results   []ContextResult `json:"results"`
+	TotalHits int             `json:"totalHits"`
+	Total     int             `json:"total"`
+	Truncated bool            `json:"truncated"`
+	Relaxed   bool            `json:"relaxed"`
+	Budget    Budget          `json:"budget"`
+}
+
+type ContextResult struct {
+	Result
+	HitIDs []string `json:"hitIds,omitempty"`
+}
+
+// InfoResponse reports index and executable diagnostics.
+type InfoResponse struct {
+	IndexPath      string   `json:"indexPath"`
+	SchemaVersion  int      `json:"schemaVersion"`
+	MessageCount   int      `json:"messageCount"`
+	SessionCount   int      `json:"sessionCount"`
+	ActivityCount  int      `json:"activityCount"`
+	FileCount      int      `json:"fileCount"`
+	Sources        []Source `json:"sources"`
+	BinaryPath     string   `json:"binaryPath"`
+	BinaryVersion  string   `json:"binaryVersion"`
+	CurrentSession string   `json:"currentSession"`
+	IndexHealthy   bool     `json:"indexHealthy"`
+	LockHealthy    bool     `json:"lockHealthy"`
+}
+
+type Source struct {
+	Path         string `json:"path"`
+	MessageCount int    `json:"messageCount"`
+	SessionCount int    `json:"sessionCount"`
+}
+
+type DoctorCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type DoctorResponse struct {
+	InfoResponse
+	OK     bool          `json:"ok"`
+	Checks []DoctorCheck `json:"checks"`
+}
+
 // Budget tells the caller what the character budget cost it, so it can decide
 // whether to widen the query or spend more.
 type Budget struct {
