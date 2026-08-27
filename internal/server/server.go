@@ -737,12 +737,15 @@ func renderOptions(q url.Values) (outputOptions, error) {
 func (s *Server) withDB(fn func(*index.DB) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, dir := range s.transcriptDirs {
-		if _, err := s.db.Sync(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+	return s.db.WithLifecycleLock(func() error {
+		// Keep request sync and the operation under one process-boundary lock.
+		for _, dir := range s.transcriptDirs {
+			if _, err := s.db.Sync(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
 		}
-	}
-	return fn(s.db)
+		return fn(s.db)
+	})
 }
 
 func nonNegativeInt(q url.Values, name string, defaultValue int) (int, error) {

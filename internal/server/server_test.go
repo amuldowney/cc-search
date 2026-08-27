@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/andrewmuldowney/cc-search/internal/index"
 )
 
 func TestHandlerServesSearchAndOpenAPI(t *testing.T) {
@@ -75,6 +77,66 @@ func TestHandlerServesSearchAndOpenAPI(t *testing.T) {
 	}
 	if _, ok := document.Paths["/v1/search"]; !ok {
 		t.Fatalf("OpenAPI paths omit /v1/search: %v", document.Paths)
+	}
+}
+
+func TestWithDBWaitsForLifecycleLock(t *testing.T) {
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "index.db")
+	api, err := New(Config{IndexPath: indexPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := api.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	})
+
+	httpServer := httptest.NewServer(api.Handler())
+	defer httpServer.Close()
+
+	held, err := index.Open(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("close lock holder: %v", err)
+		}
+	})
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get(httpServer.URL + "/v1/last")
+		if err != nil {
+			requestDone <- err
+			return
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			requestDone <- fmt.Errorf("last status = %d, want 200", response.StatusCode)
+			return
+		}
+		requestDone <- nil
+	}()
+
+	select {
+	case err := <-requestDone:
+		t.Fatalf("request completed while lifecycle lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := held.ReleaseLifecycleLock(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not complete after lifecycle lock was released")
 	}
 }
 

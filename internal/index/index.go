@@ -298,6 +298,21 @@ func (d *DB) ReleaseLifecycleLock() error {
 	return err
 }
 
+// WithLifecycleLock runs fn while holding the cross-process lifecycle lock.
+// Reuse Open's initial lock when it is still held; otherwise acquire the
+// path-specific lock for the duration of the callback.
+func (d *DB) WithLifecycleLock(fn func() error) (err error) {
+	if d.lifecycle != nil {
+		return fn()
+	}
+	lifecycle, err := acquireLifecycleLock(d.path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lifecycle.Close()) }()
+	return fn()
+}
+
 // Close releases the database handle and any lifecycle lock still held.
 func (d *DB) Close() error {
 	if d == nil {

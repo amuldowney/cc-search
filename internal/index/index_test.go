@@ -453,6 +453,55 @@ func TestLifecycleLockTimeoutNamesIndexAndWait(t *testing.T) {
 	}
 }
 
+func TestWithLifecycleLockReleasesAfterPanic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close index: %v", err)
+		}
+	})
+	if err := db.ReleaseLifecycleLock(); err != nil {
+		t.Fatal(err)
+	}
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered == nil {
+				t.Fatal("WithLifecycleLock did not propagate callback panic")
+			}
+		}()
+		db.WithLifecycleLock(func() error {
+			panic("callback panic")
+		})
+	}()
+
+	type openResult struct {
+		db  *DB
+		err error
+	}
+	opened := make(chan openResult, 1)
+	go func() {
+		other, err := Open(path)
+		opened <- openResult{db: other, err: err}
+	}()
+
+	select {
+	case result := <-opened:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if err := result.db.Close(); err != nil {
+			t.Fatalf("close reopened index: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("another index.Open did not acquire lifecycle lock promptly")
+	}
+}
+
 func TestOpenDiscardsIndexBuiltByAnOlderSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.db")
 	legacy, err := sql.Open("sqlite3", path)
