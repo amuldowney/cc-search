@@ -315,6 +315,40 @@ func TestOpenRebuildsCorruptIndex(t *testing.T) {
 	}
 }
 
+func TestOpenRefusesNewerSchemaWithoutDeletingIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`PRAGMA user_version = 8`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open accepted an index schema newer than this binary")
+	} else if !errors.Is(err, errNewerSchema) {
+		t.Fatalf("Open error = %v, want errNewerSchema", err)
+	}
+
+	check, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version int
+	if err := check.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 8 {
+		t.Fatalf("index schema version after refusal = %d, want 8", version)
+	}
+}
+
 func TestRemoveDatabaseFilesLeavesPrimaryWhenSidecarCannotBeRemoved(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.db")
 	if err := os.WriteFile(path, []byte("database"), 0o644); err != nil {

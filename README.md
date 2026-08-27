@@ -18,8 +18,15 @@ tag is required — use the Makefile and it is never forgotten.
 ```bash
 make test
 make build            # ./cc-search
-make install          # $HOME/.local/bin/cc-search
+make deploy           # test, vet, build, atomically install, verify
 ```
+
+`make deploy` is the supported installation path. It installs to
+`$HOME/.local/bin/cc-search`, or—when that path is a symlink—updates the
+symlink's target in place. This matters in the devbox, where the PATH entry is
+managed as `$HOME/.local/bin/cc-search -> $HOME/Projects/.toolchains/bin/cc-search`
+and is recreated on container startup. Override the destination with
+`INSTALL_PATH=/path/to/cc-search make deploy`.
 
 ## Agent API and clients
 
@@ -104,7 +111,9 @@ index and wait duration. The lock uses advisory Unix file locking and is
 supported on Unix targets (Linux, macOS, BSD, and illumos); no Windows lock
 backend is provided. Transient SQLite busy/locked errors and
 environmental I/O errors are returned without replacing the existing index; only
-confirmed corruption or an incompatible schema is rebuilt automatically.
+confirmed corruption or an older incompatible schema is rebuilt automatically.
+A binary encountering a newer schema refuses to run rather than destroying an
+index produced by a newer release.
 
 Terms are stemmed with porter and prefix matched, so `cache` finds `caching`
 without matching anything inside `display.cpp` or `192.168.1.112`. Terms are
@@ -198,7 +207,8 @@ provides a fallback link when markers are incomplete. Legacy transcripts without
 these markers remain ordinary session messages.
 
 **Schema version.** The index records a version; an index written by an older
-build is discarded and rebuilt on open rather than migrated.
+build is discarded and rebuilt on open rather than migrated. A binary that is
+older than the index refuses to run instead of replacing the newer index.
 
 ## Measured on the real corpus
 

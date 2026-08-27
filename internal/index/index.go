@@ -27,7 +27,10 @@ const schemaVersion = 7
 // SchemaVersion is the current derived-index schema version.
 const SchemaVersion = schemaVersion
 
-var errSchemaMismatch = errors.New("incompatible index schema")
+var (
+	errSchemaMismatch = errors.New("incompatible index schema")
+	errNewerSchema    = errors.New("index schema is newer than this binary")
+)
 
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -251,6 +254,10 @@ func open(path string) (*DB, error) {
 	}
 	if version != schemaVersion && !empty {
 		handle.Close()
+		if version > schemaVersion {
+			return nil, fmt.Errorf("%w: index has schema version %d, but this binary supports %d; deploy a newer cc-search",
+				errNewerSchema, version, schemaVersion)
+		}
 		return nil, fmt.Errorf("%w: index has schema version %d, want %d",
 			errSchemaMismatch, version, schemaVersion)
 	}
