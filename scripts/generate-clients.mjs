@@ -28,7 +28,7 @@ writeFileSync(resolve(root, "clients/python/pyproject.toml"), `[project]\nname =
 
 mkdirSync(resolve(root, "clients/typescript"), { recursive: true });
 writeFileSync(resolve(root, "clients/typescript/package.json"), `${JSON.stringify({
-  name: "@andrewmuldowney/cc-search-client",
+  name: "@amuldowney/cc-search-client",
   version: "0.1.0",
   private: true,
   type: "module",

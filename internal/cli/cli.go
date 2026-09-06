@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrewmuldowney/cc-search/internal/index"
-	"github.com/andrewmuldowney/cc-search/internal/output"
-	"github.com/andrewmuldowney/cc-search/internal/server"
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/index"
+	"github.com/amuldowney/cc-search/internal/output"
+	"github.com/amuldowney/cc-search/internal/server"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 // DefaultTranscriptDir is where Claude Code keeps transcripts, one folder per

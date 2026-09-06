@@ -17,7 +17,7 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 // schemaVersion is bumped whenever the tables change. An index written by a

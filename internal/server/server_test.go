@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrewmuldowney/cc-search/internal/index"
+	"github.com/amuldowney/cc-search/internal/index"
 )
 
 func TestHandlerServesSearchAndOpenAPI(t *testing.T) {

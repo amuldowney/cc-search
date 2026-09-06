@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrewmuldowney/cc-search/internal/index"
-	"github.com/andrewmuldowney/cc-search/internal/output"
+	"github.com/amuldowney/cc-search/internal/index"
+	"github.com/amuldowney/cc-search/internal/output"
 )
 
 type msg struct {

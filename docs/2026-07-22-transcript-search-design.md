@@ -1,7 +1,13 @@
 # Claude Code Transcript Search CLI — Design
 
 **Date:** 2026-07-22  
-**Status:** Approved  
+**Status:** Historical initial proposal (superseded by the current implementation)
+
+> This document records the original design discussion. The implementation now
+> also indexes pi sessions, exposes a loopback API, stores activity/session
+> metadata, uses prose/content search modes, and supports context, command,
+> diagnostic, and concurrent lifecycle operations. See
+> [architecture.md](architecture.md) for the current design.
 
 ## Overview
 

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andrewmuldowney/cc-search/internal/output"
+	"github.com/amuldowney/cc-search/internal/output"
 )
 
 func decodeValue(t *testing.T, stdout *bytes.Buffer, value any) {

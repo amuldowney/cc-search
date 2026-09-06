@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 // writeTranscript writes a JSONL transcript file for sessionID whose lines are

@@ -1,4 +1,4 @@
-module github.com/andrewmuldowney/cc-search
+module github.com/amuldowney/cc-search
 
 go 1.26.5
 

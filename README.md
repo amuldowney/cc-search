@@ -1,48 +1,180 @@
 # cc-search
 
-A fast local CLI for searching Claude Code and pi conversation transcripts.
-Built for agents to pad context, refresh session memory, and dig up concepts
-from earlier conversations without re-reading whole transcripts.
+`cc-search` is a fast, local CLI and loopback HTTP API for searching Claude
+Code and [pi](https://github.com/badlogic/pi-mono) conversation transcripts.
+It gives agents a small, structured way to recover decisions, refresh recent
+context, find exact commands, and inspect pi subagent activity without loading
+entire JSONL transcripts into a context window.
 
-Both transcript stores are indexed by default: `~/.claude/projects` and
-`~/.pi/agent/sessions`, each walked recursively so every project is covered.
-`--transcripts DIR` overrides both with a single root.
+Everything stays local. The search index is derived data and can be deleted and
+rebuilt at any time.
 
-Design: [docs/2026-07-22-transcript-search-design.md](docs/2026-07-22-transcript-search-design.md).
+## Quick start
 
-## Build
+Requirements:
 
-FTS5 is not compiled into `go-sqlite3` by default, so the `sqlite_fts5` build
-tag is required — use the Makefile and it is never forgotten.
+- Go 1.26.5 or newer
+- cgo and a C compiler (`mattn/go-sqlite3` is used)
+- Python 3.10+ and Node 22+ only if you run the generated-client tests
 
 ```bash
-make test
-make build            # ./cc-search
-make deploy           # test, vet, build, atomically install, verify
+git clone https://github.com/amuldowney/cc-search.git
+cd cc-search
+make deploy
+cc-search doctor
+cc-search search "the topic you need" --limit 5
 ```
 
-`make deploy` is the supported installation path. It installs to
-`$HOME/.local/bin/cc-search`, or—when that path is a symlink—updates the
-symlink's target in place. This matters in the devbox, where the PATH entry is
-managed as `$HOME/.local/bin/cc-search -> $HOME/Projects/.toolchains/bin/cc-search`
-and is recreated on container startup. Override the destination with
-`INSTALL_PATH=/path/to/cc-search make deploy`.
+`make deploy` runs the Go tests and vet, builds with the required `sqlite_fts5`
+build tag, installs atomically to `$HOME/.local/bin/cc-search`, and verifies the
+installed binary. Set `INSTALL_PATH=/path/to/cc-search` to choose another
+location. `make build` only creates the local `./cc-search` binary.
 
-## Agent API and clients
+On Debian or Ubuntu, the native build prerequisites are typically:
 
-`cc-search serve` exposes the same search operations through a versioned HTTP
-API bound to loopback. The port is configurable, and the service synchronizes
-transcripts before data operations:
+```bash
+sudo apt install build-essential
+```
+
+Always use the Makefile: a plain `go build` omits the FTS5 build tag and produces
+a binary that cannot search.
+
+## Agent quick reference
+
+Query, browsing, and diagnostic commands emit one JSON line on stdout.
+Warnings and errors go to stderr, so piping those commands to `jq` is safe.
+`rebuild` and `serve` print human-readable status text. Exit codes are 0 for
+success (including no matches), 1 for runtime errors, and 2 for invalid
+command-line usage.
+
+```bash
+# Refresh recent conversation context.
+cc-search last 20
+cc-search last --hours 4 --type user
+
+# Find a decision, then read the surrounding exchange.
+cc-search search "authentication redirect" --limit 5 --preview-length 180
+cc-search read MESSAGE_ID_PREFIX --before 5 --after 8
+
+# Search commands and tool output when the exact string is not prose.
+cc-search commands "docker compose" --tool Bash --full
+cc-search search "no such module: fts5" --all --full
+
+# Get a relevance-selected context bundle.
+cc-search context "artifact first deploy" --hits 3 --before 3 --after 8
+
+# Browse resumable sessions and pi subagent work.
+cc-search sessions "deploy system" --limit 10
+cc-search activities --status failed
+cc-search activity ACTIVITY_ID --full
+
+# Diagnose the installation or rebuild derived data.
+cc-search info
+cc-search doctor
+cc-search rebuild
+```
+
+Search patterns are positional and must come before flags. A unique prefix of a
+message or activity ID is accepted by `read` and `activity`.
+
+## What is indexed
+
+By default, each invocation recursively indexes both transcript roots that
+exist in the current home directory:
+
+- `~/.claude/projects` — Claude Code JSONL transcripts
+- `~/.pi/agent/sessions` — pi session JSONL transcripts, including linked child
+  sessions
+
+The derived SQLite index is `~/.claude/search-index.db`. Use
+`--transcripts DIR` to replace both defaults with one transcript root and
+`--index PATH` to choose another index. Missing default roots produce a warning
+but are not fatal, which makes the same binary useful on machines that only run
+one of the two agents.
+
+A transcript record is indexed when it has an ID, timestamp, and extractable
+content. Assistant and user text, thinking blocks, tool calls, and tool results
+are parsed. Pi activity markers are stored as activity records and linked to
+parent and child sessions. Metadata records that are not messages are skipped.
+
+Each message has two searchable forms:
+
+- **prose** (the default): what was actually said; tool-only messages are
+  omitted from results
+- **content** (`--all`): prose plus tool arguments and tool output, including
+  command output and file contents
+
+Queries use FTS5 with the Porter stemmer and Unicode tokenization. Ordinary
+terms are safe literal terms and are ANDed. A multi-term query that has no
+exact matches retries with any term and reports `"relaxed": true`; treat those
+results as related leads, not an exact answer. Use `--any` to request that
+mode directly. Use `--raw` for FTS5 boolean expressions such as:
+
+```bash
+cc-search search '"caddy" OR "pihole" NOT "proxy"' --raw
+```
+
+Raw queries are never relaxed and punctuation must be quoted for FTS5.
+
+When run inside pi, search excludes the current pi session by default because
+it is already in the caller's context. `--include-current` restores it, and an
+explicit `--session ID` always selects that session.
+
+## Output and context budgets
+
+Compact results contain `id`, `sessionId`, `timestamp`, `type`, `preview`, and
+`charCount`. `--full` emits the complete `content` instead of a preview.
+`--preview-length` changes compact previews. The default output budget is
+60,000 characters; use `--budget 0` to disable it.
+
+The budget shapes output rather than blindly truncating JSON:
+
+- preview mode shrinks previews to keep more hits, then drops results only when
+  the minimum preview still does not fit
+- full mode emits whole message bodies in rank order until the budget is used
+- every response reports `budget.limit`, `budget.spent`, `budget.dropped`, and
+  `budget.shrunk`
+
+`context` first selects relevant hits and then returns a deduplicated,
+chronological expansion. Each expanded result identifies the search hits that
+caused it to be included.
+
+## Loopback Agent API
+
+Start the local API in a separate process:
 
 ```bash
 cc-search serve --port 8765
 curl 'http://127.0.0.1:8765/v1/search?pattern=authentication&limit=5'
+curl http://127.0.0.1:8765/v1/health
 curl http://127.0.0.1:8765/openapi.json
 ```
 
-The OpenAPI document is [internal/server/openapi.json](internal/server/openapi.json)
-and is also available as `openapi/cc-search.json`. The checked-in agent clients
-are generated from it:
+The service binds only to localhost or another loopback address; it has no
+remote authentication boundary and must not be exposed to a network interface.
+It synchronizes changed transcripts before data operations and serializes
+lifecycle operations with queries.
+
+The versioned endpoints cover health, search, recent messages, contextual
+reads, sessions, pi activities, exact tool commands, diagnostics, and rebuild:
+
+- `/v1/health`
+- `/v1/search`
+- `/v1/last`
+- `/v1/read`
+- `/v1/sessions`
+- `/v1/activities`
+- `/v1/activity`
+- `/v1/context`
+- `/v1/commands`
+- `/v1/info`
+- `/v1/doctor`
+- `/v1/rebuild`
+
+The checked-in OpenAPI document is
+[`openapi/cc-search.json`](openapi/cc-search.json), and is also served at
+`/openapi.json`. The standard-library Python and dependency-free TypeScript
+clients are generated from that document:
 
 ```bash
 make generate-clients
@@ -52,176 +184,53 @@ make test-clients
 - Python: `clients/python/cc_search_client`
 - TypeScript: `clients/typescript/src`
 
-Both clients use structured responses and typed HTTP errors. They are intended
-for short agent scripts that compose search, selection, and context reads; use
-the CLI for a one-off lookup. The HTTP service is local-only and has no remote
-authentication boundary.
+The clients are intended for small agent scripts that compose search, selection,
+and context reads. Use the CLI for one-off lookups.
 
-## Use
+## Installing the agent skill
 
-Every run syncs the index before querying, so the data is always current. The
-first run builds the whole index; later runs only reindex transcripts whose
-mtime or size changed.
+This repository includes the matching skill at
+[`.claude/skills/cc-search`](.claude/skills/cc-search). When an agent opens this
+repository as its project, it can use that project-local skill. To install or
+update it as a user-level Claude Code skill:
 
 ```bash
-# memory refresh
-cc-search last 10
-cc-search last --hours 2 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
-cc-search last 30 --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47 --type user
-
-# concept research
-cc-search search "grayscale waveform"
-cc-search search "display.cpp" --limit 5 --window-hours 48
-cc-search search "retry loop" --include-current  # include this pi session
-cc-search search "no such module: fts5" --all   # include tool calls + output
-cc-search search "battery dispatch reserve" --any  # any term, not all
-cc-search search '("caddy" OR "pihole") NOT "proxy"' --raw   # boolean logic
-
-# read a hit in context (id, or any unique prefix, from a search result)
-cc-search read 36b182bb --before 3 --after 3
-
-# browse and resume an earlier session
-cc-search sessions "deploy system" --limit 10
-cc-search sessions --cwd /home/andrew/Projects/pi-remote
-
-# inspect Pi subagent work
-cc-search activities --session SESSION_ID
-cc-search activities --status failed
-cc-search activity ACTIVITY_ID --full
-
-# search several hits and expand their surrounding windows
-cc-search context "artifact-first deploy" --hits 3 --before 3 --after 8 --all
-
-# recover an exact historical tool invocation (and its output)
-cc-search commands "no such table" --tool Bash --full
-cc-search commands "docker compose" --session SESSION_ID
-
-# index and installation diagnostics
-cc-search info
-cc-search doctor
-
-# index maintenance (rarely needed — sync is automatic)
-cc-search rebuild
-cc-search rebuild --session 62de7038-83f9-4ca9-8b2b-165ab6c70d47
+rm -rf "$HOME/.claude/skills/cc-search"
+mkdir -p "$HOME/.claude/skills"
+cp -R .claude/skills/cc-search "$HOME/.claude/skills/cc-search"
 ```
 
-Concurrent processes using the same index serialize opening and synchronization
-through a path-specific lifecycle lock. Waiting is bounded; a timeout names the
-index and wait duration. The lock uses advisory Unix file locking and is
-supported on Unix targets (Linux, macOS, BSD, and illumos); no Windows lock
-backend is provided. Transient SQLite busy/locked errors and
-environmental I/O errors are returned without replacing the existing index; only
-confirmed corruption or an older incompatible schema is rebuilt automatically.
-A binary encountering a newer schema refuses to run rather than destroying an
-index produced by a newer release.
+The skill teaches an agent when to use `cc-search`, how to read a hit in context,
+when `--all` is necessary, and how to treat retrieved transcript text as
+untrusted historical evidence. Keep the checked-in skill and this README in
+sync when the CLI contract changes.
 
-Terms are stemmed with porter and prefix matched, so `cache` finds `caching`
-without matching anything inside `display.cpp` or `192.168.1.112`. Terms are
-ANDed. When a multi-word query matches nothing, the search retries
-with any term rather than reporting the topic was never discussed, and says so
-with `"relaxed": true` plus a note on stderr — those hits are related, not
-exact. `--any` asks for that behaviour up front.
+## Development
 
-When running inside pi, `search` excludes the current session by default because
-its contents are already in the caller's context. `--include-current` restores
-it, and an explicit `--session ID` always selects that session. `last` and
-`read` are unchanged, so they can still recover the current conversation.
-
-`--raw` hands the pattern to FTS5 verbatim, so `OR`, `NOT`, `NEAR`, parentheses
-and `"quoted phrases"` all work. Punctuation must then be quoted yourself —
-bare `display.cpp` is a syntax error in that mode, `"display.cpp"` is fine. A
-raw query is never relaxed, since it says exactly what was meant.
-
-`read` takes a message id from a search result — any unique prefix works — and
-returns it with its neighbours from the same session, oldest first. That is how
-you recover *why* something was decided rather than just the sentence that
-decided it.
-
-- `sessions` returns compact resumable-session rows with the working directory, visibility, parent session, last message, and message count. A query matches session prose; `--cwd` filters by exact working directory.
-- `activities` and `activity` expose durable Pi activity records, including parent/child session links and terminal status. `activity ID --full` adds marker/linkage fields.
-- `context` keeps selected search hits in relevance order, then returns one deduplicated chronological expansion. Each expanded message has `hitIds`, and the top-level `query` preserves why the context was collected.
-- `commands` searches full content but returns normalized tool name, structured arguments, source session/message id, and timestamp. `--full` or `--include-output` pairs the invocation with its recorded result.
-- `info` reports schema and indexed-source counts, executable identity, current session, and health. `doctor` adds named checks and reports `ok`.
-
-Output is capped at 60,000 characters by default (`--budget N`, `0` disables),
-and the cap *shapes* the result set rather than just chopping its tail:
-previews shrink so every result still fits, down to a 40-character floor, and
-only then are results dropped. Under `--full` the opposite is right — bodies
-were asked for whole, so they are emitted whole until the budget runs out.
-
-Every response reports what it cost:
-
-```json
-"budget": {"limit": 60000, "spent": 414, "dropped": 0, "shrunk": false}
+```bash
+make test             # Go tests with FTS5
+make vet              # Go vet with FTS5
+make build            # ./cc-search
+make test-clients     # regenerate and test Python + TypeScript clients
+make deploy           # test, vet, install, and verify
 ```
 
-The search pattern is positional and must come before the flags — putting a
-flag there is rejected rather than searched for.
+The code is organized as:
 
-Output is one line of JSON on stdout; warnings and errors go to stderr, so
-`cc-search ... | jq` is always safe. Exit 0 (including for zero results), 1 on
-error, 2 on a usage mistake.
+- `internal/transcript` — JSONL parsing and Claude/pi record normalization
+- `internal/index` — SQLite/FTS5 schema, incremental sync, queries, locks
+- `internal/output` — bounded, agent-friendly JSON rendering
+- `internal/cli` — command-line parsing and commands
+- `internal/server` — loopback HTTP API and embedded OpenAPI document
+- `clients` — generated Python and TypeScript API clients
+- `.claude/skills/cc-search` — the associated agent skill and references
 
-```json
-{"results":[{"id":"...","sessionId":"...","timestamp":"2026-07-23T04:01:04Z",
-"type":"assistant","preview":"Done. To recap: …","charCount":342}],
-"total":1,"truncated":false,"relaxed":false,
-"budget":{"limit":60000,"spent":342,"dropped":0,"shrunk":false}}
-```
+The index schema is versioned. An index from an older binary is discarded and
+rebuilt; a newer index refuses to run with an older binary. SQLite corruption
+and transient I/O errors are not silently replaced. Concurrent processes using
+the same index serialize lifecycle operations with a path-specific advisory
+lock.
 
-Compact output contains a single-line `preview` field capped at 100 characters
-(`--preview-length N`). `--full` replaces it with the complete `content` field;
-the two fields are never emitted together. Full content preserves newlines, and
-`--preview-length N` only affects compact output. `truncated` is true when
-`--limit` cut results off.
-
-Paths default to `~/.claude/projects/-home-andrew-Projects` and
-`~/.claude/search-index.db`, overridable with `--transcripts` and `--index`.
-
-## What gets indexed
-
-One row per transcript record that has a `uuid`, a `timestamp`, and extractable
-content. Assistant/user messages contribute their text and thinking blocks,
-tool calls are rendered as `[tool: Name] {args}`, and tool results are indexed
-in full — so searches hit command output and file contents too. Metadata
-records (`mode`, `last-prompt`, `file-history-*`, hook attachments) are skipped.
-
-**Prose vs content.** Each message is indexed twice: `content` (everything,
-including tool arguments and command output) and `prose` (only what was
-actually said). **Queries read prose by default** — matching, previews and
-`--full` all use it, and messages that only made a tool call drop out
-entirely. Without this a query like "caddy proxy" is dominated by
-`[tool: Edit] {...}` messages whose arguments happen to contain the words.
-
-`--all` switches to the full content, which is what you want when hunting a
-command, a path, an error string, or something that only ever appeared in
-command output.
-
-**Subagent activities.** Pi activity markers are ingested separately from
-messages. Attached child sessions are linked through their `activityId`,
-`parentActivityId`, `parentSessionId`, and `childSessionId`; parent Agent
-start/response rows and child messages expose those fields in results. The index recognizes
-`pi:activity-started`, `pi:activity-linked`, and `pi:activity-terminal` records
-without treating them as searchable messages. An attached session header also
-provides a fallback link when markers are incomplete. Legacy transcripts without
-these markers remain ordinary session messages.
-
-**Schema version.** The index records a version; an index written by an older
-build is discarded and rebuilt on open rather than migrated. A binary that is
-older than the index refuses to run instead of replacing the newer index.
-
-## Measured on the real corpus
-
-86 sessions, 20,210 messages:
-
-| | |
-|---|---|
-| Full rebuild | 6.5s |
-| Query (`last`, `search`) | 0.15–0.32s including the incremental sync |
-| Index size | 40 MB |
-
-The index is larger than the design's 1 MB estimate because tool results — file
-dumps, command output — dominate the corpus. It is fully derived from the
-transcripts and can be deleted at any time; schema/obvious database corruption
-is detected on open and rebuilt automatically. The full integrity scan is
-available through `cc-search doctor` rather than running before every query.
+For implementation history, see [`docs/architecture.md`](docs/architecture.md).
+The dated design document in `docs/2026-07-22-transcript-search-design.md` is
+the original proposal and is retained as historical context.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 func TestFormatRendersMessageFields(t *testing.T) {

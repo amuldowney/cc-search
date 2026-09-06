@@ -1,4 +1,4 @@
-cc-search
+/cc-search
 __pycache__/
 *.pyc
 *.db

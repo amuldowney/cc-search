@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 // Result is one message as it appears in CLI output.

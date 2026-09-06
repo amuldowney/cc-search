@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/andrewmuldowney/cc-search/internal/index"
-	"github.com/andrewmuldowney/cc-search/internal/output"
-	"github.com/andrewmuldowney/cc-search/internal/transcript"
+	"github.com/amuldowney/cc-search/internal/index"
+	"github.com/amuldowney/cc-search/internal/output"
+	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
 // Config supplies the derived-data index and transcript roots used by the API.
