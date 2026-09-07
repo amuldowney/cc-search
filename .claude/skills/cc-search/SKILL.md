@@ -121,8 +121,8 @@ curl http://127.0.0.1:8765/openapi.json
 ```
 
 It is local-only and unauthenticated; never bind it to a non-loopback address
-or expose it through a proxy. The repository includes generated, dependency-
-free Python and TypeScript clients under `clients/`.
+or expose it through a proxy. Use curl or another standard HTTP client when a
+composed workflow needs the loopback API; the CLI remains the normal path.
 
 ## Safety
 

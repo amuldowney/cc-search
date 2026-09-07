@@ -235,18 +235,15 @@ systems. The unsupported-platform fallback does not claim a lifecycle lock.
 | Stale or unhealthy index | Run `cc-search doctor`, then `cc-search rebuild`. |
 | Concurrent access failure | Wait for the other process; the lock timeout names the index. |
 
-## Build and generated clients
+## Build
 
 ```bash
 make test
 make vet
 make build
-make generate-clients
-make test-clients
 make deploy
 ```
 
 The `sqlite_fts5` build tag is mandatory for every Go build and test. The
-OpenAPI document at `openapi/cc-search.json` is the source for the checked-in
-Python and TypeScript clients. Run `make generate-clients` after changing the
-API contract.
+OpenAPI document at `openapi/cc-search.json` remains available from the
+loopback service at `/openapi.json` for HTTP clients that need it.

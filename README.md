@@ -15,7 +15,6 @@ Requirements:
 
 - Go 1.26.5 or newer
 - cgo and a C compiler (`mattn/go-sqlite3` is used)
-- Python 3.10+ and Node 22+ only if you run the generated-client tests
 
 ```bash
 git clone https://github.com/amuldowney/cc-search.git
@@ -173,19 +172,8 @@ reads, sessions, pi activities, exact tool commands, diagnostics, and rebuild:
 
 The checked-in OpenAPI document is
 [`openapi/cc-search.json`](openapi/cc-search.json), and is also served at
-`/openapi.json`. The standard-library Python and dependency-free TypeScript
-clients are generated from that document:
-
-```bash
-make generate-clients
-make test-clients
-```
-
-- Python: `clients/python/cc_search_client`
-- TypeScript: `clients/typescript/src`
-
-The clients are intended for small agent scripts that compose search, selection,
-and context reads. Use the CLI for one-off lookups.
+`/openapi.json`. Use the CLI for normal agent lookups; the loopback API remains
+available for clients that need a composed HTTP workflow.
 
 ## Installing the agent skill
 
@@ -211,7 +199,6 @@ sync when the CLI contract changes.
 make test             # Go tests with FTS5
 make vet              # Go vet with FTS5
 make build            # ./cc-search
-make test-clients     # regenerate and test Python + TypeScript clients
 make deploy           # test, vet, install, and verify
 ```
 
@@ -222,7 +209,6 @@ The code is organized as:
 - `internal/output` — bounded, agent-friendly JSON rendering
 - `internal/cli` — command-line parsing and commands
 - `internal/server` — loopback HTTP API and embedded OpenAPI document
-- `clients` — generated Python and TypeScript API clients
 - `.claude/skills/cc-search` — the associated agent skill and references
 
 The index schema is versioned. An index from an older binary is discarded and

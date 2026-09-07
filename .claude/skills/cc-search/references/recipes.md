@@ -123,7 +123,7 @@ Start the service in a long-lived process:
 cc-search serve --port 8765
 ```
 
-Then use the generated Python client or plain HTTP:
+Then use plain HTTP:
 
 ```bash
 curl 'http://127.0.0.1:8765/v1/search?pattern=authentication&limit=5'

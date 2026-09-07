@@ -85,6 +85,6 @@ specified rebuild operation, and serializes requests with a mutex so a query
 cannot race a transcript replacement or rebuild. The same index methods back
 the CLI and API, so their search and output semantics remain aligned.
 
-The generated Python and TypeScript clients are checked in for small agent
-scripts. `scripts/generate-clients.mjs` validates the OpenAPI paths and rewrites
-the generated clients from the checked-in document.
+The OpenAPI document is kept in `internal/server/openapi.json` and exposed at
+`/openapi.json`; agents normally use the CLI, while composed workflows can use
+plain HTTP against the loopback service.

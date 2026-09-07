@@ -1,9 +1,0 @@
-[project]
-name = "cc-search-client"
-version = "0.1.0"
-description = "Agent client for the local cc-search OpenAPI service"
-requires-python = ">=3.10"
-dependencies = []
-
-[tool.setuptools.packages.find]
-where = ["."]
