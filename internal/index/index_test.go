@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
@@ -1329,6 +1331,120 @@ func TestSyncLinksAttachedChildWithoutActivityMarkers(t *testing.T) {
 	if len(got) != 1 || got[0].ActivityID != "child-session" || got[0].ActivityRole != "child" ||
 		got[0].ParentSessionID != "parent-session" || got[0].ChildSessionID != "child-session" {
 		t.Fatalf("attached fallback = %+v", got)
+	}
+}
+
+func TestSyncIndexesNestedCodexTranscript(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "08", "01", "rollout-session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join([]string{
+		`{"timestamp":"2026-08-01T00:00:00Z","type":"session_meta","payload":{"id":"codex-session-1","cwd":"/work/codex"}}`,
+		`{"timestamp":"2026-08-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","id":"codex-user-1","content":[{"type":"input_text","text":"find codexneedle in the rollout"}]}}`,
+		`{"timestamp":"2026-08-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"codex-assistant-1","content":[{"type":"output_text","text":"codexneedle is indexed"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stats, err := db.Sync(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SessionsIndexed != 1 || stats.MessagesIndexed != 2 {
+		t.Fatalf("sync stats = %+v", stats)
+	}
+	got, err := db.Search(SearchOptions{Query: "codexneedle", SessionID: "codex-session-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("search returned %d messages, want 2", len(got))
+	}
+	var cwd string
+	if err := db.sql.QueryRow(`SELECT cwd FROM sessions WHERE sessionId = ?`, "codex-session-1").Scan(&cwd); err != nil {
+		t.Fatal(err)
+	}
+	if cwd != "/work/codex" {
+		t.Errorf("session cwd = %q, want /work/codex", cwd)
+	}
+}
+
+func TestSyncIndexesCompressedCodexTranscriptAndReplacesPlainSibling(t *testing.T) {
+	root := t.TempDir()
+	plainPath := filepath.Join(root, "2026", "08", "01", "rollout-codex-session.jsonl")
+	compressedPath := plainPath + ".zst"
+	if err := os.MkdirAll(filepath.Dir(plainPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join([]string{
+		`{"timestamp":"2026-08-01T00:00:00Z","type":"session_meta","payload":{"id":"codex-compressed","cwd":"/work/codex"}}`,
+		`{"timestamp":"2026-08-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","id":"msg-1","content":[{"type":"input_text","text":"compressed codex needle"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(plainPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Sync(root); err != nil {
+		t.Fatal(err)
+	}
+
+	compressedFile, err := os.Create(compressedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder, err := zstd.NewWriter(compressedFile)
+	if err != nil {
+		compressedFile.Close()
+		t.Fatal(err)
+	}
+	if _, err := encoder.Write([]byte(body)); err != nil {
+		encoder.Close()
+		compressedFile.Close()
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		compressedFile.Close()
+		t.Fatal(err)
+	}
+	if err := compressedFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(plainPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Sync(root); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Search(SearchOptions{Query: "compressed needle", SessionID: "codex-compressed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "msg-1" {
+		t.Fatalf("compressed search = %+v, want one stable message", got)
+	}
+	var plainFiles, compressedFiles int
+	if err := db.sql.QueryRow(`SELECT count(*) FROM files WHERE path = ?`, plainPath).Scan(&plainFiles); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRow(`SELECT count(*) FROM files WHERE path = ?`, compressedPath).Scan(&compressedFiles); err != nil {
+		t.Fatal(err)
+	}
+	if plainFiles != 0 || compressedFiles != 1 {
+		t.Fatalf("files rows = plain %d compressed %d", plainFiles, compressedFiles)
 	}
 }
 

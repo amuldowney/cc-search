@@ -1,10 +1,10 @@
 # cc-search
 
 `cc-search` is a fast, local CLI and loopback HTTP API for searching Claude
-Code and [pi](https://github.com/badlogic/pi-mono) conversation transcripts.
-It gives agents a small, structured way to recover decisions, refresh recent
-context, find exact commands, and inspect pi subagent activity without loading
-entire JSONL transcripts into a context window.
+Code, [pi](https://github.com/badlogic/pi-mono), and OpenAI Codex conversation
+transcripts. It gives agents a small, structured way to recover decisions,
+refresh recent context, find exact commands, and inspect pi subagent activity
+without loading entire JSONL transcripts into a context window.
 
 Everything stays local. The search index is derived data and can be deleted and
 rebuilt at any time.
@@ -78,23 +78,30 @@ message or activity ID is accepted by `read` and `activity`.
 
 ## What is indexed
 
-By default, each invocation recursively indexes both transcript roots that
+By default, each invocation recursively indexes the transcript roots that
 exist in the current home directory:
 
 - `~/.claude/projects` — Claude Code JSONL transcripts
 - `~/.pi/agent/sessions` — pi session JSONL transcripts, including linked child
   sessions
+- `$CODEX_HOME/sessions` — active OpenAI Codex rollout JSONL files, including
+  Codex's `.jsonl.zst` compressed form
+- `$CODEX_HOME/archived_sessions` — archived Codex rollout JSONL files, including
+  compressed rollouts
 
-The derived SQLite index is `~/.claude/search-index.db`. Use
-`--transcripts DIR` to replace both defaults with one transcript root and
-`--index PATH` to choose another index. Missing default roots produce a warning
-but are not fatal, which makes the same binary useful on machines that only run
-one of the two agents.
+`CODEX_HOME` defaults to `~/.codex`, matching Codex. The derived SQLite index
+is `~/.claude/search-index.db`. Use `--transcripts DIR` to replace all defaults
+with one transcript root and `--index PATH` to choose another index. Missing
+default roots produce a warning but are not fatal, which makes the same binary
+useful on machines that only run one of the agents.
 
 A transcript record is indexed when it has an ID, timestamp, and extractable
 content. Assistant and user text, thinking blocks, tool calls, and tool results
-are parsed. Pi activity markers are stored as activity records and linked to
-parent and child sessions. Metadata records that are not messages are skipped.
+are parsed. Codex rollout `session_meta`/`turn_context`/usage records stay
+metadata; canonical `response_item` messages and tool records are normalized,
+while redundant event mirrors are deduplicated. Pi activity markers are stored
+as activity records and linked to parent and child sessions. Metadata records
+that are not messages are skipped.
 
 Each message has two searchable forms:
 
@@ -204,7 +211,7 @@ make deploy           # test, vet, install, and verify
 
 The code is organized as:
 
-- `internal/transcript` — JSONL parsing and Claude/pi record normalization
+- `internal/transcript` — JSONL parsing and Claude/pi/Codex record normalization
 - `internal/index` — SQLite/FTS5 schema, incremental sync, queries, locks
 - `internal/output` — bounded, agent-friendly JSON rendering
 - `internal/cli` — command-line parsing and commands

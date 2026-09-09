@@ -4,10 +4,13 @@ package index
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/mattn/go-sqlite3"
 
 	"github.com/amuldowney/cc-search/internal/transcript"
@@ -335,16 +339,24 @@ func (d *DB) Rebuild(dir, sessionID string) (SyncStats, error) {
 func (d *DB) sync(dir, sessionID string, force bool) (SyncStats, error) {
 	var stats SyncStats
 
-	// Walk recursively: pi keeps transcripts one level down, in per-directory
-	// folders under its sessions root.
+	// Walk recursively: pi and Codex both keep transcripts below nested
+	// session roots.
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+		if entry.IsDir() || !isTranscriptFile(entry.Name()) {
 			return nil
 		}
-		session := strings.TrimSuffix(entry.Name(), ".jsonl")
+		// Codex keeps cold rollouts as .jsonl.zst. When both representations
+		// briefly exist, prefer the plain file just as Codex does.
+		if strings.HasSuffix(entry.Name(), ".jsonl.zst") {
+			plain := strings.TrimSuffix(path, ".zst")
+			if _, statErr := os.Stat(plain); statErr == nil {
+				return nil
+			}
+		}
+		session := transcriptSessionName(entry.Name())
 		if sessionID != "" && !sessionMatches(session, sessionID) {
 			return nil
 		}
@@ -400,10 +412,22 @@ func (d *DB) reconcileAttachedActivities() error {
 }
 
 // sessionMatches reports whether a filename-derived session name is the one
-// asked for. pi filenames are <timestamp>_<uuid>, so also accept a match
-// against the uuid suffix.
+// asked for. pi filenames are <timestamp>_<uuid>, while Codex rollout names
+// commonly use hyphens before the session UUID.
 func sessionMatches(session, sessionID string) bool {
-	return session == sessionID || strings.HasSuffix(session, "_"+sessionID)
+	return session == sessionID || strings.HasSuffix(session, "_"+sessionID) ||
+		strings.HasSuffix(session, "-"+sessionID)
+}
+
+func isTranscriptFile(name string) bool {
+	return strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".jsonl.zst")
+}
+
+func transcriptSessionName(name string) string {
+	if strings.HasSuffix(name, ".jsonl.zst") {
+		return strings.TrimSuffix(name, ".jsonl.zst")
+	}
+	return strings.TrimSuffix(name, ".jsonl")
 }
 
 // changed reports whether path differs from what the files table recorded.
@@ -419,7 +443,7 @@ func (d *DB) changed(path string, info os.FileInfo) bool {
 // indexFile replaces every indexed message for one session with the current
 // contents of its transcript.
 func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
-	file, err := os.Open(path)
+	file, err := openTranscript(path)
 	if err != nil {
 		return 0, err
 	}
@@ -428,9 +452,17 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	// Parse before starting the transaction so Pi's header session ID is
 	// available when removing the previous contents of a changed file. Pi
 	// filenames include a timestamp (<timestamp>_<uuid>), while its messages
-	// use the bare UUID from the session header.
+	// use the bare UUID from the session header. Codex may store the same JSONL
+	// as a zstd-compressed .jsonl.zst file.
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	// Keep the established bound for ordinary transcripts. Compressed Codex
+	// rollouts commonly contain larger tool-output records, so give those a
+	// larger (still bounded) limit.
+	maxLineSize := 16 * 1024 * 1024
+	if strings.HasSuffix(path, ".jsonl.zst") {
+		maxLineSize = 64 * 1024 * 1024
+	}
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	parser := new(transcript.Parser)
 	messages := []transcript.Message{}
 	for scanner.Scan() {
@@ -442,16 +474,21 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 		if msg.SessionID == "" {
 			msg.SessionID = session
 		}
-		if rawSessionID != "" && rawSessionID != session {
+		if rawSessionID != "" && rawSessionID != session && !parser.IsCodex() {
 			// Pi message IDs are only unique within a session. Keep the
 			// transcript ID recognizable while making the index key global so
 			// messages from different sessions cannot overwrite each other.
+			// Codex response-item IDs are already globally useful; collision
+			// handling below only disambiguates the rare duplicate file case.
 			msg.ID = rawSessionID + ":" + msg.ID
 		}
 		messages = append(messages, msg)
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, fmt.Errorf("scan %s: %w", path, err)
+	}
+	if err := d.ensureUniqueMessageIDs(messages, path); err != nil {
+		return 0, err
 	}
 	linkActivityParents(messages, parser.ActivityEvents())
 	tx, err := d.sql.Begin()
@@ -460,14 +497,18 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM messages WHERE sourcePath = ?`, path); err != nil {
+	if err := deleteTranscriptRows(tx, path); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM sessions WHERE sourcePath = ?`, path); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`DELETE FROM activities WHERE recordSourcePath = ?`, path); err != nil {
-		return 0, err
+	// Codex can replace a plain rollout with its compressed sibling. Treat
+	// those paths as one logical transcript so compression does not duplicate
+	// every message in the derived index.
+	for _, sibling := range transcriptSiblings(path) {
+		if sibling != path {
+			if err := deleteTranscriptRows(tx, sibling); err != nil {
+				return 0, err
+			}
+		}
 	}
 
 	sessionMeta := parser.Session()
@@ -581,8 +622,111 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	return len(messages), nil
 }
 
+// ensureUniqueMessageIDs protects the global messages primary key from
+// transcripts whose record ids are absent or only unique within a rollout.
+// Keep the ordinary id unchanged whenever possible; collisions get a stable
+// source-path suffix so reindexing produces the same public id.
+func (d *DB) ensureUniqueMessageIDs(messages []transcript.Message, path string) error {
+	seen := make(map[string]struct{}, len(messages))
+	replacedPaths := make(map[string]struct{}, len(transcriptSiblings(path)))
+	for _, sibling := range transcriptSiblings(path) {
+		replacedPaths[sibling] = struct{}{}
+	}
+	for i := range messages {
+		base := messages[i].ID
+		if base == "" {
+			base = "message"
+		}
+		candidate := base
+		for n := 0; ; n++ {
+			if n > 0 {
+				candidate = base + ":" + messagePathSuffix(path)
+				if n > 1 {
+					candidate += ":" + fmt.Sprint(n)
+				}
+			}
+			if _, exists := seen[candidate]; exists {
+				continue
+			}
+			var source string
+			err := d.sql.QueryRow(`SELECT sourcePath FROM messages WHERE id = ?`, candidate).Scan(&source)
+			if err == nil {
+				if _, replaced := replacedPaths[source]; !replaced {
+					continue
+				}
+			}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("check message id collision: %w", err)
+			}
+			break
+		}
+		messages[i].ID = candidate
+		seen[candidate] = struct{}{}
+	}
+	return nil
+}
+
+func messagePathSuffix(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func deleteTranscriptRows(tx *sql.Tx, path string) error {
+	for _, statement := range []string{
+		`DELETE FROM messages WHERE sourcePath = ?`,
+		`DELETE FROM sessions WHERE sourcePath = ?`,
+		`DELETE FROM activities WHERE recordSourcePath = ?`,
+		`DELETE FROM files WHERE path = ?`,
+	} {
+		if _, err := tx.Exec(statement, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func transcriptSiblings(path string) []string {
+	if strings.HasSuffix(path, ".jsonl.zst") {
+		return []string{path, strings.TrimSuffix(path, ".zst")}
+	}
+	if strings.HasSuffix(path, ".jsonl") {
+		return []string{path, path + ".zst"}
+	}
+	return []string{path}
+}
+
+func openTranscript(path string) (io.ReadCloser, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasSuffix(path, ".jsonl.zst") {
+		return file, nil
+	}
+	decoder, err := zstd.NewReader(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("open zstd transcript %s: %w", path, err)
+	}
+	return &compressedTranscript{decoder: decoder, file: file}, nil
+}
+
+type compressedTranscript struct {
+	decoder *zstd.Decoder
+	file    *os.File
+}
+
+func (r *compressedTranscript) Read(p []byte) (int, error) {
+	return r.decoder.Read(p)
+}
+
+func (r *compressedTranscript) Close() error {
+	r.decoder.Close()
+	return r.file.Close()
+}
+
 func sessionName(path string) string {
-	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return transcriptSessionName(filepath.Base(path))
 }
 
 type indexedActivity struct {

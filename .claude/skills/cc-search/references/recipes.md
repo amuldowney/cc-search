@@ -104,8 +104,10 @@ cc-search doctor | python3 -m json.tool
 ```
 
 Confirm the relevant transcript root appears in `sources`. The default corpus
-is both `~/.claude/projects` and `~/.pi/agent/sessions`; a custom
-`--transcripts DIR` replaces both. A missing root is a warning, not a failure.
+is `~/.claude/projects`, `~/.pi/agent/sessions`, `$CODEX_HOME/sessions`, and
+`$CODEX_HOME/archived_sessions` (`CODEX_HOME` defaults to `~/.codex`); a custom
+`--transcripts DIR` replaces all defaults. A missing root is a warning, not a
+failure.
 
 If a transcript was just edited, a normal command automatically synchronizes
 it. Use `rebuild` only to force a full or per-session reindex:

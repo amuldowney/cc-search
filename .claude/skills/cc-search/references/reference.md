@@ -203,11 +203,16 @@ Default transcript roots are:
 ```text
 ~/.claude/projects
 ~/.pi/agent/sessions
+$CODEX_HOME/sessions
+$CODEX_HOME/archived_sessions
 ```
 
-Both are walked recursively. `--transcripts DIR` replaces both with one root.
-The index defaults to `~/.claude/search-index.db`; it is fully derived and safe
-to delete.
+All are walked recursively; Codex's plain `.jsonl` and compressed `.jsonl.zst`
+rollouts are both supported. `CODEX_HOME` defaults to `~/.codex`.
+`--transcripts DIR` replaces all defaults with one root. The index defaults to
+`~/.claude/search-index.db`; it is fully derived and safe to delete.
+Codex rollout metadata is skipped; canonical response items and tool records
+are normalized, and duplicate event mirrors are suppressed.
 
 Every operation compares transcript mtime and size with the `files` table and
 re-reads only changed files. A changed transcript is deleted and reinserted,

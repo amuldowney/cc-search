@@ -338,3 +338,102 @@ func TestParseLineSkipsPiMetadataRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestParserReadsCodexSessionMeta(t *testing.T) {
+	p := new(Parser)
+	line := `{"timestamp":"2026-08-01T00:00:00Z","type":"session_meta","payload":{"id":"codex-session","timestamp":"2026-08-01T00:00:00Z","cwd":"/work/project","instructions":"do not index this"}}`
+	if _, ok := p.ParseLine([]byte(line)); ok {
+		t.Fatal("session_meta should not produce a message")
+	}
+	if got := p.Session(); got.ID != "codex-session" || got.CWD != "/work/project" {
+		t.Fatalf("session = %+v", got)
+	}
+}
+
+func TestParserParsesCodexMessagesAndSeparatesReasoning(t *testing.T) {
+	p := new(Parser)
+	lines := []string{
+		`{"timestamp":"2026-08-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","id":"user-1","content":[{"type":"input_text","text":"ship the feature"}]}}`,
+		`{"timestamp":"2026-08-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"assistant-1","content":[{"type":"reasoning","summary":[{"type":"summary_text","text":"internal plan"}]},{"type":"output_text","text":"I shipped the feature"}]}}`,
+	}
+	var got []Message
+	for _, line := range lines {
+		if msg, ok := p.ParseLine([]byte(line)); ok {
+			got = append(got, msg)
+		}
+	}
+	if len(got) != 2 || got[0].Type != "user" || got[1].Type != "assistant" {
+		t.Fatalf("messages = %+v", got)
+	}
+	if got[0].Timestamp != 1785542401000 || got[0].ID != "user-1" {
+		t.Fatalf("user message = %+v", got[0])
+	}
+	if !strings.Contains(got[1].Content, "internal plan") || got[1].Prose != "I shipped the feature" {
+		t.Fatalf("assistant content/prose = %q / %q", got[1].Content, got[1].Prose)
+	}
+}
+
+func TestParserStripsCodexUserDisplayPrefixFromProse(t *testing.T) {
+	line := `{"timestamp":"2026-08-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","id":"user-prefix","content":[{"type":"input_text","text":"<environment_context>hidden setup</environment_context>\n## My request for Codex:\nship the feature"}]}}`
+	msg, ok := (&Parser{}).ParseLine([]byte(line))
+	if !ok {
+		t.Fatal("user message did not parse")
+	}
+	if msg.Prose != "ship the feature" {
+		t.Fatalf("Prose = %q, want the display request", msg.Prose)
+	}
+	if !strings.Contains(msg.Content, "hidden setup") {
+		t.Fatalf("Content = %q, want raw context retained for --all", msg.Content)
+	}
+}
+
+func TestParserParsesCodexToolsAndOutputs(t *testing.T) {
+	p := new(Parser)
+	call := `{"timestamp":"2026-08-01T00:00:03Z","type":"response_item","payload":{"type":"function_call","id":"item-1","call_id":"call-1","name":"shell","arguments":"{\"command\":\"pwd\"}"}}`
+	output := `{"timestamp":"2026-08-01T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"/work/project","status":"completed"}}`
+	msg, ok := p.ParseLine([]byte(call))
+	if !ok || len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call-1" || msg.ToolCalls[0].Name != "shell" {
+		t.Fatalf("call = %+v, ok = %v", msg, ok)
+	}
+	if msg.Prose != "" || !strings.Contains(msg.Content, "pwd") {
+		t.Fatalf("call content/prose = %q / %q", msg.Content, msg.Prose)
+	}
+	msg, ok = p.ParseLine([]byte(output))
+	if !ok || len(msg.ToolResults) != 1 || msg.ToolResults[0].ID != "call-1" || msg.ToolResults[0].Content != "/work/project" {
+		t.Fatalf("output = %+v, ok = %v", msg, ok)
+	}
+	if msg.Prose != "" {
+		t.Fatalf("tool output prose = %q, want empty", msg.Prose)
+	}
+}
+
+func TestParserDeduplicatesCodexEventMirrorsAndKeepsLegacyEvents(t *testing.T) {
+	p := new(Parser)
+	canonical := `{"timestamp":"2026-08-01T00:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"answer-1","content":[{"type":"output_text","text":"canonical answer"}]}}`
+	mirror := `{"timestamp":"2026-08-01T00:00:05Z","type":"event_msg","payload":{"type":"agent_message","message":"canonical answer"}}`
+	legacy := `{"timestamp":"2026-08-01T00:00:06Z","type":"event_msg","payload":{"type":"user_message","message":"event-only legacy text"}}`
+	if _, ok := p.ParseLine([]byte(canonical)); !ok {
+		t.Fatal("canonical response item did not parse")
+	}
+	if _, ok := p.ParseLine([]byte(mirror)); ok {
+		t.Fatal("canonical event mirror should be skipped")
+	}
+	msg, ok := p.ParseLine([]byte(legacy))
+	if !ok || msg.Type != "user" || msg.Prose != "event-only legacy text" {
+		t.Fatalf("legacy event = %+v, ok = %v", msg, ok)
+	}
+}
+
+func TestParserSkipsCodexMetadataWithTextLikeFields(t *testing.T) {
+	p := new(Parser)
+	lines := []string{
+		`{"timestamp":"2026-08-01T00:00:07Z","type":"turn_context","payload":{"cwd":"/work","instructions":"metadata only"}}`,
+		`{"timestamp":"2026-08-01T00:00:08Z","type":"compacted","payload":{"summary":"old conversation summary"}}`,
+		`{"timestamp":"2026-08-01T00:00:09Z","type":"token_count","payload":{"input_tokens":42,"output_tokens":7}}`,
+	}
+	for _, line := range lines {
+		if _, ok := p.ParseLine([]byte(line)); ok {
+			t.Errorf("metadata became a message: %s", line)
+		}
+	}
+}

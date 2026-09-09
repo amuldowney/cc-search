@@ -1,4 +1,4 @@
-// Package transcript parses Claude Code and pi JSONL transcript files into
+// Package transcript parses Claude Code, pi, and Codex JSONL transcript files into
 // indexable messages.
 package transcript
 
@@ -34,7 +34,7 @@ type Message struct {
 	ChildSessionID   string
 }
 
-// Session describes the session header seen at the beginning of a pi file.
+// Session describes session metadata seen in a pi or Codex transcript.
 // Claude Code transcripts do not have a corresponding header.
 type Session struct {
 	ID            string
@@ -84,10 +84,11 @@ type ActivityEvent struct {
 // carry no message (mode, last-prompt, file-history-*, ...) simply leave the
 // fields empty and get skipped.
 //
-// Two schemas are recognised:
+// Three schemas are recognised:
 //   - Claude Code: {"uuid": ..., "sessionId": ..., "type": "user"|"assistant", ...}
 //   - pi: {"id": ..., "type": "message", "message": {"role": ..., "content": ...}}
 //     plus a {"type": "session", "id": ...} header line naming the session.
+//   - Codex: {"type": "response_item"|"event_msg", "payload": ...} rollout lines.
 type record struct {
 	UUID          string          `json:"uuid"`
 	ID            string          `json:"id"` // pi records
@@ -100,15 +101,37 @@ type record struct {
 	Visibility    string          `json:"visibility"`
 	CustomType    string          `json:"customType"`
 	Data          json.RawMessage `json:"data"`
+	Payload       json.RawMessage `json:"payload"` // Codex rollout records
+	Item          json.RawMessage `json:"item"`    // older Codex response_item records
 	Content       json.RawMessage `json:"content"` // system/custom_message records
 	Details       json.RawMessage `json:"details"`
-	Message       *struct {
-		Role       string          `json:"role"` // pi records
-		Content    json.RawMessage `json:"content"`
-		Details    json.RawMessage `json:"details"`
-		ToolCallID string          `json:"toolCallId"`
-		ToolName   string          `json:"toolName"`
-	} `json:"message"`
+	Message       *recordMessage  `json:"message"`
+}
+
+// recordMessage accepts the object used by Claude/pi transcripts, while also
+// retaining a scalar legacy message value used by some Codex event records.
+type recordMessage struct {
+	Role       string          `json:"role"` // pi records
+	Content    json.RawMessage `json:"content"`
+	Details    json.RawMessage `json:"details"`
+	ToolCallID string          `json:"toolCallId"`
+	ToolName   string          `json:"toolName"`
+	Raw        json.RawMessage `json:"-"`
+}
+
+func (m *recordMessage) UnmarshalJSON(data []byte) error {
+	m.Raw = append(m.Raw[:0], data...)
+	if len(data) == 0 || string(data) == "null" || data[0] != '{' {
+		return nil
+	}
+	type plain recordMessage
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	decoded.Raw = append(decoded.Raw[:0], data...)
+	*m = recordMessage(decoded)
+	return nil
 }
 
 // block is one element of a structured content array.
@@ -126,15 +149,27 @@ type block struct {
 }
 
 // Parser extracts Messages from the lines of one transcript file. It is
-// stateful because pi transcripts declare their session id once, in a header
-// line, rather than on every record.
+// stateful because pi and Codex transcripts declare session metadata once,
+// rather than on every record.
 type Parser struct {
 	session  Session
 	activity []ActivityEvent
+	codex    bool
+
+	// Codex emits event_msg mirrors for many response_item messages. Keep the
+	// canonical prose seen so far so the mirror can be skipped without making
+	// event-only records disappear.
+	codexCanonical map[string]struct{}
+	codexEvents    map[string]struct{}
 }
 
-// Session returns the parsed pi session header, if one was seen.
+// Session returns parsed session metadata, if one was seen.
 func (p *Parser) Session() Session { return p.session }
+
+// IsCodex reports whether this parser has seen a Codex rollout record. It lets
+// the index preserve Codex's globally useful response-item IDs while retaining
+// the older Pi filename disambiguation rule.
+func (p *Parser) IsCodex() bool { return p.codex }
 
 // ActivityEvents returns a copy of the activity markers seen in this file.
 func (p *Parser) ActivityEvents() []ActivityEvent {
@@ -149,12 +184,29 @@ func ParseLine(line []byte) (Message, bool) {
 	return new(Parser).ParseLine(line)
 }
 
-// ParseLine extracts a Message from one line, remembering any pi session
-// header seen so far.
+// ParseLine extracts a Message from one line, remembering pi/Codex session
+// metadata seen so far.
 func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	var rec record
 	if err := json.Unmarshal(line, &rec); err != nil {
 		return Message{}, false
+	}
+
+	// Codex rollout records use a distinct envelope and must be handled before
+	// the Claude/pi shape detection below. In particular, session_meta is
+	// useful session metadata but is never a conversational message.
+	if isCodexRecord(rec) {
+		if msg, ok := p.parseCodexLine(rec, line); ok {
+			return msg, true
+		}
+		// Once a line has the Codex envelope, do not let a metadata record
+		// fall through to the Claude/pi parser just because it also has an id
+		// or a textual field.
+		if len(rec.Payload) > 0 || len(rec.Item) > 0 || rec.Type == "session_meta" ||
+			rec.Type == "turn_context" || rec.Type == "compacted" || rec.Type == "token_count" ||
+			rec.Type == "event_msg" || rec.Type == "user_message" || rec.Type == "agent_message" {
+			return Message{}, false
+		}
 	}
 
 	// A pi session header names the session every following line belongs to.
@@ -195,7 +247,7 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	typ := rec.Type
 	raw := rec.Content
 	messageDetails := rec.Details
-	if rec.Message != nil {
+	if rec.Message != nil && len(rec.Message.Content) > 0 {
 		raw = rec.Message.Content
 		messageDetails = rec.Message.Details
 		if rec.Type == "message" { // pi: the role carries the message type
@@ -245,13 +297,7 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	}, true
 }
 
-func extractTools(raw json.RawMessage, message *struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
-	Details    json.RawMessage `json:"details"`
-	ToolCallID string          `json:"toolCallId"`
-	ToolName   string          `json:"toolName"`
-}) ([]ToolCall, []ToolResult) {
+func extractTools(raw json.RawMessage, message *recordMessage) ([]ToolCall, []ToolResult) {
 	var calls []ToolCall
 	var results []ToolResult
 	var blocks []block

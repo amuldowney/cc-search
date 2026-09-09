@@ -1,13 +1,13 @@
 ---
 name: cc-search
-description: Use when earlier Claude Code or pi conversation context is needed and is not in the current context — decisions, commands, errors, paths, recent work, resumable sessions, or pi subagent activity. Prefer this tool over hand-grepping transcript JSONL.
+description: Use when earlier Claude Code, pi, or Codex conversation context is needed and is not in the current context — decisions, commands, errors, paths, recent work, resumable sessions, or pi subagent activity. Prefer this tool over hand-grepping transcript JSONL.
 ---
 
 # cc-search
 
-`cc-search` searches local Claude Code and pi conversation transcripts without
-dumping megabytes of nested JSONL into context. Use it to recover historical
-context, not to replace inspection of the current repository.
+`cc-search` searches local Claude Code, pi, and Codex conversation transcripts
+without dumping megabytes of nested JSONL into context. Use it to recover
+historical context, not to replace inspection of the current repository.
 
 ## First use
 
@@ -106,9 +106,13 @@ cc-search read 36b182bb --before 3 --after 3
    `--session`.
 5. Run `cc-search info` to verify which roots and files are indexed.
 
-Default sources are `~/.claude/projects` and `~/.pi/agent/sessions`; they are
-walked recursively. `--transcripts DIR` replaces both with one root, and
-`--index PATH` selects a different derived database.
+Default sources are `~/.claude/projects`, `~/.pi/agent/sessions`,
+`$CODEX_HOME/sessions`, and `$CODEX_HOME/archived_sessions`; they are walked
+recursively. `CODEX_HOME` defaults to `~/.codex`. `--transcripts DIR` replaces
+all defaults with one root, and `--index PATH` selects a different derived
+database. Codex plain `.jsonl` and compressed `.jsonl.zst` rollouts are both
+supported. Rollout metadata is skipped; canonical response items and tool
+records are normalized, and duplicate event mirrors are suppressed.
 
 ## Agent API
 

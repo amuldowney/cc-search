@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,22 @@ func run(t *testing.T, cfg Config, args ...string) (output.Response, string, int
 		}
 	}
 	return resp, stderr.String(), code
+}
+
+func TestConfigDefaultsIncludeCodexRootsAndRespectCodexHome(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	cfg := (Config{}).withDefaults()
+	wantActive := filepath.Join(codexHome, "sessions")
+	wantArchived := filepath.Join(codexHome, "archived_sessions")
+	if !slices.Contains(cfg.TranscriptDirs, wantActive) || !slices.Contains(cfg.TranscriptDirs, wantArchived) {
+		t.Fatalf("TranscriptDirs = %v, want active and archived Codex roots", cfg.TranscriptDirs)
+	}
+
+	override := Config{TranscriptDirs: []string{"/explicit"}}.withDefaults()
+	if len(override.TranscriptDirs) != 1 || override.TranscriptDirs[0] != "/explicit" {
+		t.Fatalf("explicit TranscriptDirs were replaced: %v", override.TranscriptDirs)
+	}
 }
 
 func TestServeAcceptsOnlyLoopbackHosts(t *testing.T) {

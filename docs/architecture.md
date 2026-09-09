@@ -1,30 +1,34 @@
 # Current architecture
 
-`cc-search` is a local, derived-data search service for Claude Code and pi
-transcripts. This document describes the implementation currently in the
+`cc-search` is a local, derived-data search service for Claude Code, pi, and
+Codex transcripts. This document describes the implementation currently in the
 repository; the dated design document beside it is the original proposal.
 
 ## Data flow
 
 ```text
 Claude Code JSONL ─┐
-                   ├─ transcript parser ─ SQLite messages + FTS5 ─ CLI / HTTP API
-pi session JSONL ──┘                         │
-                                             ├─ sessions
-                                             └─ pi activities
+pi session JSONL ───┼─ transcript parser ─ SQLite messages + FTS5 ─ CLI / HTTP API
+Codex rollout JSONL ┘                         │
+                                              ├─ sessions
+                                              └─ pi activities
 ```
 
-The default roots are `~/.claude/projects` and `~/.pi/agent/sessions`. A CLI
-invocation opens the derived index, synchronizes each root, releases its
-lifecycle lock, performs the read, and closes the database. The server performs
-an initial sync and repeats the same synchronization before data operations.
-Missing roots are warnings so a machine using only one agent still works.
+The default roots are `~/.claude/projects`, `~/.pi/agent/sessions`,
+`$CODEX_HOME/sessions`, and `$CODEX_HOME/archived_sessions`, where
+`CODEX_HOME` defaults to `~/.codex`. Codex's plain `.jsonl` and compressed
+`.jsonl.zst` rollouts are both supported. A CLI invocation opens the derived index,
+synchronizes each root, releases its lifecycle lock, performs the read, and
+closes the database. The server performs an initial sync and repeats the same
+synchronization before data operations. Missing roots are warnings so a machine
+using only one agent still works.
 
 ## Transcript normalization
 
-`internal/transcript` walks JSONL files recursively and normalizes records with
-an ID, timestamp, type, and extractable content into `Message` values. Text,
-thinking blocks, tool calls, and tool results are retained. Each message has:
+`internal/transcript` walks JSONL files recursively and normalizes Claude Code,
+pi, and Codex records with an ID, timestamp, type, and extractable content into
+`Message` values. Text, thinking blocks, tool calls, and tool results are
+retained. Each message has:
 
 - `Content`: everything searchable, including tool arguments and results
 - `Prose`: text that was actually said, used by default for agent-friendly
@@ -32,9 +36,11 @@ thinking blocks, tool calls, and tool results are retained. Each message has:
 - source/session/timestamp metadata
 - pi activity linkage when present
 
-Metadata records are not indexed as messages. pi activity markers are parsed
-into durable activity rows and related child sessions are linked through the
-session table.
+Metadata records are not indexed as messages. Codex rollout metadata such as
+`session_meta`, `turn_context`, and token accounting is skipped; its canonical
+`response_item` messages and tool calls/results are normalized, with duplicate
+`event_msg` mirrors suppressed. Pi activity markers are parsed into durable
+activity rows and related child sessions are linked through the session table.
 
 ## SQLite index
 

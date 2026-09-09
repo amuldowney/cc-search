@@ -31,6 +31,14 @@ const DefaultTranscriptDir = ".claude/projects"
 // working directory. It is indexed alongside the Claude Code transcripts.
 const DefaultPiSessionsDir = ".pi/agent/sessions"
 
+// DefaultCodexSessionsDir and DefaultCodexArchivedSessionsDir are the active
+// and archived Codex rollout roots. Codex may nest rollout files several
+// levels below either root, so the index walks them recursively.
+const (
+	DefaultCodexSessionsDir         = ".codex/sessions"
+	DefaultCodexArchivedSessionsDir = ".codex/archived_sessions"
+)
+
 // DefaultIndexPath is where the search index lives.
 const DefaultIndexPath = ".claude/search-index.db"
 
@@ -128,9 +136,18 @@ func (c Config) withDefaults() Config {
 		c.IndexPath = filepath.Join(home, DefaultIndexPath)
 	}
 	if len(c.TranscriptDirs) == 0 {
+		codexHome := os.Getenv("CODEX_HOME")
+		codexSessionsDir := filepath.Join(home, DefaultCodexSessionsDir)
+		codexArchivedDir := filepath.Join(home, DefaultCodexArchivedSessionsDir)
+		if codexHome != "" {
+			codexSessionsDir = filepath.Join(codexHome, "sessions")
+			codexArchivedDir = filepath.Join(codexHome, "archived_sessions")
+		}
 		c.TranscriptDirs = []string{
 			filepath.Join(home, DefaultTranscriptDir),
 			filepath.Join(home, DefaultPiSessionsDir),
+			codexSessionsDir,
+			codexArchivedDir,
 		}
 	}
 	return c
