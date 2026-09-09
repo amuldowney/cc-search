@@ -9,6 +9,11 @@ Use the host's existing secret store and Git credential helper. Do not begin wit
 `gh auth login`: the token is persisted outside the container and interactive
 login state is not.
 
+Do not relaunch the devbox merely to repair this. The image and `~/.bashrc`
+already source the shared secrets for interactive shells. Agent/tool shell
+invocations are non-interactive and do not read `~/.bashrc`, so source
+`secrets env --global` explicitly in the same invocation as `gh` and `git`.
+
 ## Standard workflow
 
 1. Inspect the repository before pushing:
