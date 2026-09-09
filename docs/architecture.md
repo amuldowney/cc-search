@@ -20,8 +20,9 @@ The default roots are `~/.claude/projects`, `~/.pi/agent/sessions`,
 `.jsonl.zst` rollouts are both supported. A CLI invocation opens the derived index,
 synchronizes each root, releases its lifecycle lock, performs the read, and
 closes the database. The server performs an initial sync and repeats the same
-synchronization before data operations. Missing roots are warnings so a machine
-using only one agent still works.
+synchronization before data operations. Missing roots are ignored during normal
+operations and reported by the CLI's `doctor` command, so a machine using only
+one agent still works.
 
 ## Transcript normalization
 
@@ -75,7 +76,8 @@ order until the budget is exhausted. The accounting fields are always present:
 ```
 
 The default search space is `prose`; `--all` switches reads and searches to
-`content`. Search excludes the current pi session when pi exposes
+`content`. Missing transcript roots stay silent here and are surfaced by
+`doctor`. Search excludes the current pi session when pi exposes
 `PI_SESSION_ID` or `PI_SESSION_FILE`; an explicit `--session` wins.
 
 The `context` operation keeps search hits in relevance order, expands their

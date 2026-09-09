@@ -768,7 +768,7 @@ func TestSearchRequiresPattern(t *testing.T) {
 	}
 }
 
-func TestMissingTranscriptDirIsNotFatal(t *testing.T) {
+func TestMissingTranscriptDirIsSilentDuringQueries(t *testing.T) {
 	cfg := Config{
 		IndexPath:      filepath.Join(t.TempDir(), "index.db"),
 		TranscriptDirs: []string{filepath.Join(t.TempDir(), "does-not-exist")},
@@ -778,10 +778,28 @@ func TestMissingTranscriptDirIsNotFatal(t *testing.T) {
 	code := Run([]string{"last", "5"}, cfg, &stdout, &stderr)
 
 	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 with a warning, stderr = %s", code, stderr.String())
+		t.Fatalf("exit code = %d, want 0, stderr = %s", code, stderr.String())
 	}
-	if stderr.Len() == 0 {
-		t.Error("expected a warning on stderr about the missing transcript dir")
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want no missing-directory warning during a query", stderr.String())
+	}
+}
+
+func TestDoctorReportsMissingTranscriptDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	cfg := Config{
+		IndexPath:      filepath.Join(t.TempDir(), "index.db"),
+		TranscriptDirs: []string{missing},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"doctor"}, cfg, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), missing) {
+		t.Errorf("stderr = %q, want the missing transcript directory", stderr.String())
 	}
 }
 

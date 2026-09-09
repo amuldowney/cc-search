@@ -92,8 +92,8 @@ exist in the current home directory:
 `CODEX_HOME` defaults to `~/.codex`, matching Codex. The derived SQLite index
 is `~/.claude/search-index.db`. Use `--transcripts DIR` to replace all defaults
 with one transcript root and `--index PATH` to choose another index. Missing
-default roots produce a warning but are not fatal, which makes the same binary
-useful on machines that only run one of the agents.
+roots are ignored during normal queries; `cc-search doctor` reports them, so the
+same binary is useful on machines that only run one of the agents.
 
 A transcript record is indexed when it has an ID, timestamp, and extractable
 content. Assistant and user text, thinking blocks, tool calls, and tool results

@@ -264,9 +264,15 @@ func (f *commonFlags) outputOptions(truncated bool) output.Options {
 }
 
 // openIndex opens the index and brings it up to date with the transcripts on
-// disk. A missing or unreadable transcript directory is a warning, not an
-// error — a previously built index can still answer queries.
+// disk. Missing transcript directories are expected when an agent is not
+// installed, so they are silent during normal operations.
 func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
+	return openIndexMode(cfg, stderr, false)
+}
+
+// openIndexMode is the shared opener used by normal commands and doctor.
+// reportMissing lets doctor surface absent roots without polluting every query.
+func openIndexMode(cfg Config, stderr io.Writer, reportMissing bool) (*index.DB, error) {
 	db, err := index.Open(cfg.IndexPath)
 	if err != nil {
 		return nil, err
@@ -274,7 +280,9 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 	for _, dir := range cfg.TranscriptDirs {
 		if _, err := db.Sync(dir); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
+				if reportMissing {
+					fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
+				}
 			} else {
 				return nil, closeIndexWithError(db, err)
 			}
@@ -724,7 +732,7 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 }
 
 func diagnosticInfo(cfg Config, stderr io.Writer, verify bool) (info output.InfoResponse, err error) {
-	db, err := openIndex(cfg, stderr)
+	db, err := openIndexMode(cfg, stderr, verify)
 	if err != nil {
 		return info, err
 	}
