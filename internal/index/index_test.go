@@ -180,6 +180,39 @@ func TestSearchFindsMatchingMessages(t *testing.T) {
 	}
 }
 
+func TestSearchFindsJevModelChoiceCustomEntry(t *testing.T) {
+	root := t.TempDir()
+	writeRawTranscript(t, root, "session-a", []string{
+		`{"type":"session","id":"session-a","timestamp":"2026-09-30T23:00:00Z","cwd":"/work"}`,
+		`{"type":"custom","customType":"pi-remote:jev-model-choice","id":"choice-1","parentId":"result-1","timestamp":"2026-09-30T23:00:01Z","data":{"activityId":"activity-1","outcome":"fallback","model":"openai-codex/gpt-6-luna","thinking":"medium","confidence":0.62,"reason":"low_confidence","prompt":"secret child prompt"}}`,
+	})
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Sync(root); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Search(SearchOptions{Query: "jev model choice fallback low confidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Prose, "openai-codex/gpt-6-luna") ||
+		!strings.Contains(got[0].Prose, "medium") ||
+		!strings.Contains(got[0].Prose, "62%") ||
+		!strings.Contains(got[0].Prose, "low confidence") {
+		t.Errorf("search result prose = %q, missing decision details", got[0].Prose)
+	}
+	if strings.Contains(got[0].Content, "secret child prompt") {
+		t.Errorf("child prompt leaked into search result: %q", got[0].Content)
+	}
+}
+
 func TestSearchRespectsLimit(t *testing.T) {
 	db, _ := newIndex(t, []msg{
 		{"user", "grayscale one", 40},

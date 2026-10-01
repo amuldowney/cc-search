@@ -273,6 +273,28 @@ func TestParserReadsAttachedActivityLinks(t *testing.T) {
 	}
 }
 
+func TestParseJevModelChoiceCustomEntryAsSearchableMessage(t *testing.T) {
+	line := []byte(`{"type":"custom","customType":"pi-remote:jev-model-choice","id":"choice-1","parentId":"result-1","sessionId":"session-a","timestamp":"2026-09-30T23:00:00Z","data":{"activityId":"activity-1","outcome":"fallback","model":"openai-codex/gpt-6-luna","thinking":"medium","confidence":0.62,"reason":"low_confidence","prompt":"must not be indexed"}}`)
+
+	msg, ok := ParseLine(line)
+
+	if !ok {
+		t.Fatal("expected Jev model choice to parse as a searchable message")
+	}
+	if msg.Type != "custom" || msg.ActivityID != "activity-1" || msg.SessionID != "session-a" {
+		t.Fatalf("message metadata = %+v", msg)
+	}
+	prose := strings.ToLower(msg.Prose)
+	for _, term := range []string{"jev model choice", "fallback", "openai-codex/gpt-6-luna", "medium", "62%", "low confidence"} {
+		if !strings.Contains(prose, term) {
+			t.Errorf("Prose %q does not contain %q", msg.Prose, term)
+		}
+	}
+	if strings.Contains(msg.Content, "must not be indexed") || strings.Contains(msg.Prose, "must not be indexed") {
+		t.Fatalf("prompt leaked into searchable content: %+v", msg)
+	}
+}
+
 func TestParseLineRendersPiToolCallBlock(t *testing.T) {
 	line := []byte(`{"type":"message","id":"a1",
 		"timestamp":"2026-07-31T23:34:19.197Z",

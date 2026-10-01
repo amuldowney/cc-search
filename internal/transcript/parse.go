@@ -4,6 +4,8 @@ package transcript
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -226,6 +228,9 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 		p.session.CWD = rec.CWD
 	}
 
+	if message, ok := parseJevModelChoice(rec, p.session.ID); ok {
+		return message, true
+	}
 	if event, ok := parseActivityEvent(rec); ok {
 		p.activity = append(p.activity, event)
 		return Message{}, false
@@ -337,6 +342,73 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// parseJevModelChoice converts the prompt-free decision marker into searchable
+// prose. Only the bounded decision fields are included; arbitrary transcript
+// fields such as the original task prompt are deliberately ignored.
+func parseJevModelChoice(rec record, sessionID string) (Message, bool) {
+	if rec.Type != "custom" || rec.CustomType != "pi-remote:jev-model-choice" || rec.ID == "" || rec.Timestamp == "" {
+		return Message{}, false
+	}
+	var data struct {
+		ActivityID string   `json:"activityId"`
+		Outcome    string   `json:"outcome"`
+		Model      string   `json:"model"`
+		Thinking   string   `json:"thinking"`
+		Confidence *float64 `json:"confidence"`
+		Reason     string   `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Data, &data); err != nil || len(data.ActivityID) > 256 ||
+		(data.Outcome != "jev" && data.Outcome != "fallback") ||
+		data.Model == "" || len(data.Model) > 160 || data.Thinking == "" || len(data.Thinking) > 40 {
+		return Message{}, false
+	}
+	if data.Confidence != nil && (math.IsNaN(*data.Confidence) || math.IsInf(*data.Confidence, 0) || *data.Confidence < 0 || *data.Confidence > 1) {
+		return Message{}, false
+	}
+	if data.Outcome == "jev" && (data.Confidence == nil || data.Reason != "") {
+		return Message{}, false
+	}
+	if data.Outcome == "fallback" && !isJevFallbackReason(data.Reason) {
+		return Message{}, false
+	}
+
+	ts, err := time.Parse(time.RFC3339Nano, rec.Timestamp)
+	if err != nil {
+		return Message{}, false
+	}
+	outcome := fmt.Sprintf("fallback to %s at %s effort", data.Model, data.Thinking)
+	if data.Outcome == "jev" {
+		outcome = fmt.Sprintf("Jev selected %s at %s effort", data.Model, data.Thinking)
+	}
+	prose := "Jev model choice: " + outcome
+	if data.Outcome == "fallback" {
+		prose += "; fallback reason: " + strings.ReplaceAll(data.Reason, "_", " ")
+	}
+	if data.Confidence != nil {
+		prose += fmt.Sprintf("; Jev confidence: %.0f%%", *data.Confidence*100)
+	}
+	if data.ActivityID != "" {
+		prose += "; activity id: " + data.ActivityID
+	}
+	if sessionID == "" {
+		sessionID = rec.SessionID
+	}
+	return Message{
+		ID: rec.ID, EntryID: rec.ID, SessionID: sessionID,
+		Timestamp: ts.UnixMilli(), Type: "custom", Content: prose, Prose: prose,
+		CharCount: len(prose), ActivityID: data.ActivityID,
+	}, true
+}
+
+func isJevFallbackReason(reason string) bool {
+	switch reason {
+	case "missing_key", "no_fallback_candidate", "single_candidate", "low_confidence", "invalid_answer", "timeout", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseActivityEvent(rec record) (ActivityEvent, bool) {
