@@ -266,13 +266,27 @@ func open(path string) (*DB, error) {
 			errSchemaMismatch, version, schemaVersion)
 	}
 
-	if _, err := handle.Exec(schema); err != nil {
+	// Persist WAL once; already-configured opens must not take a write lock.
+	var journalMode string
+	if err := handle.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
 		handle.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
+		return nil, fmt.Errorf("read journal mode: %w", err)
 	}
-	if _, err := handle.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-		handle.Close()
-		return nil, fmt.Errorf("set schema version: %w", err)
+	if journalMode != "wal" {
+		if _, err := handle.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("enable WAL: %w", err)
+		}
+	}
+	if empty {
+		if _, err := handle.Exec(schema); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("create schema: %w", err)
+		}
+		if _, err := handle.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("set schema version: %w", err)
+		}
 	}
 	// Full integrity checking is intentionally not done here. This function
 	// runs before every CLI query, and quick_check scans the entire database

@@ -458,6 +458,11 @@ func TestOpenPreservesIndexOnTransientBusyError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A legacy rollback-journal database can still hold an exclusive reader
+	// lock. WAL deliberately allows reads during an exclusive writer.
+	if _, err := db.sql.Exec(`PRAGMA journal_mode = DELETE`); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
