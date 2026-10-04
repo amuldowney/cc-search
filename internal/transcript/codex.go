@@ -233,7 +233,7 @@ func (p *Parser) codexMessage(rec record, item json.RawMessage, role, content, p
 	sessionID := firstNonEmpty(rec.SessionID, p.session.ID)
 	return Message{
 		ID: id, EntryID: id, SessionID: sessionID, Timestamp: ts,
-		Type: role, Content: content, Prose: prose, CharCount: len(content),
+		Type: role, Content: content, Prose: prose, CharCount: len(content), ProseCharCount: len(prose),
 		ToolCalls: calls, ToolResults: results,
 	}
 }

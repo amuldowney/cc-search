@@ -24,9 +24,9 @@ import (
 	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
-// schemaVersion is bumped whenever the tables change. An index written by a
-// different version is discarded rather than migrated — it is all derived data.
-const schemaVersion = 7
+// schemaVersion is bumped whenever the tables change. Version 7 indexes can be
+// upgraded by the additive read-projection migration helper.
+const schemaVersion = 8
 
 // SchemaVersion is the current derived-index schema version.
 const SchemaVersion = schemaVersion
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS files (
   mtime INTEGER,
   size  INTEGER
 );
-`
+` + projectionSchema
 
 // DB is an open index database.
 type DB struct {
@@ -156,6 +156,8 @@ type LastOptions struct {
 	SessionID string
 	Type      string
 	ProseOnly bool
+	// PreviewLength uses cached bodies up to 512 runes; zero or larger values use full bodies.
+	PreviewLength int
 }
 
 // SearchOptions selects messages matching a full-text query.
@@ -174,6 +176,8 @@ type SearchOptions struct {
 	// Raw passes Query to FTS5 untouched, so it may use OR, NOT, NEAR,
 	// grouping and phrases. Punctuation must then be quoted by the caller.
 	Raw bool
+	// PreviewLength uses cached bodies up to 512 runes; zero or larger values use full bodies.
+	PreviewLength int
 }
 
 // Open opens (creating if needed) the index at path and holds the lifecycle
@@ -511,17 +515,31 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 	}
 	defer tx.Rollback()
 
-	if err := deleteTranscriptRows(tx, path); err != nil {
-		return 0, err
-	}
-	// Codex can replace a plain rollout with its compressed sibling. Treat
-	// those paths as one logical transcript so compression does not duplicate
-	// every message in the derived index.
-	for _, sibling := range transcriptSiblings(path) {
-		if sibling != path {
-			if err := deleteTranscriptRows(tx, sibling); err != nil {
+	affectedSessions := map[string]struct{}{}
+	for _, source := range transcriptSiblings(path) {
+		rows, err := tx.Query(`SELECT DISTINCT COALESCE(sessionId, '') FROM messages WHERE sourcePath = ?`, source)
+		if err != nil {
+			return 0, err
+		}
+		for rows.Next() {
+			var oldSession string
+			if err := rows.Scan(&oldSession); err != nil {
+				rows.Close()
 				return 0, err
 			}
+			if oldSession != "" {
+				affectedSessions[oldSession] = struct{}{}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if err := rows.Close(); err != nil {
+			return 0, err
+		}
+		if err := deleteTranscriptRows(tx, source); err != nil {
+			return 0, err
 		}
 	}
 
@@ -621,6 +639,24 @@ func (d *DB) indexFile(path, session string, info os.FileInfo) (int, error) {
 			string(calls), string(results)); err != nil {
 			return 0, err
 		}
+		if err := insertMessageProjection(tx, msg); err != nil {
+			return 0, err
+		}
+		if err := insertToolRecords(tx, msg); err != nil {
+			return 0, err
+		}
+		if msg.SessionID != "" {
+			affectedSessions[msg.SessionID] = struct{}{}
+		}
+	}
+
+	if err := refreshSourceProjection(tx, path); err != nil {
+		return 0, err
+	}
+	for _, affectedSession := range readDistinct(affectedSessions) {
+		if err := rebuildToolLinks(tx, affectedSession); err != nil {
+			return 0, err
+		}
 	}
 
 	if _, err := tx.Exec(`
@@ -687,6 +723,12 @@ func messagePathSuffix(path string) string {
 
 func deleteTranscriptRows(tx *sql.Tx, path string) error {
 	for _, statement := range []string{
+		`UPDATE tool_results SET invocationId = NULL WHERE invocationId IN
+			(SELECT invocationId FROM tool_invocations WHERE messageId IN (SELECT id FROM messages WHERE sourcePath = ?))`,
+		`DELETE FROM tool_results WHERE messageId IN (SELECT id FROM messages WHERE sourcePath = ?)`,
+		`DELETE FROM tool_invocations WHERE messageId IN (SELECT id FROM messages WHERE sourcePath = ?)`,
+		`DELETE FROM message_projections WHERE messageId IN (SELECT id FROM messages WHERE sourcePath = ?)`,
+		`DELETE FROM source_projections WHERE sourcePath = ?`,
 		`DELETE FROM messages WHERE sourcePath = ?`,
 		`DELETE FROM sessions WHERE sourcePath = ?`,
 		`DELETE FROM activities WHERE recordSourcePath = ?`,
@@ -856,18 +898,23 @@ func linkActivityParents(messages []transcript.Message, events []transcript.Acti
 	}
 }
 
-func selectColumns(alias string) string {
+func selectColumns(alias string, compact bool) string {
+	content, prose, charCount, proseCharCount, calls, results := alias+".content", alias+".prose", alias+".charCount", "p.proseCharCount", alias+".toolCalls", alias+".toolResults"
+	if compact {
+		content, prose, charCount, calls, results = "p.contentPrefix", "p.prosePrefix", "p.contentCharCount", "''", "''"
+	}
 	return strings.Join([]string{
 		alias + ".id",
 		alias + ".entryId",
 		alias + ".sessionId",
 		alias + ".timestamp",
 		alias + ".type",
-		alias + ".content",
-		alias + ".prose",
-		alias + ".charCount",
-		alias + ".toolCalls",
-		alias + ".toolResults",
+		content,
+		prose,
+		charCount,
+		proseCharCount,
+		calls,
+		results,
 		"COALESCE(NULLIF(" + alias + ".activityId, ''), childActivity.activityId, '')",
 		"COALESCE(NULLIF(" + alias + ".activityRole, ''), CASE WHEN childActivity.activityId IS NOT NULL THEN 'child' ELSE '' END)",
 		"COALESCE(NULLIF(directActivity.parentActivityId, ''), childActivity.parentActivityId, '')",
@@ -887,7 +934,9 @@ func activityJoins(alias string) string {
 
 // Last returns the most recent messages, newest first.
 func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
-	query := `SELECT ` + selectColumns("m") + ` FROM messages m` + activityJoins("m") + ` WHERE 1 = 1`
+	compact := opts.PreviewLength > 0 && opts.PreviewLength <= maxCompactPreviewLength
+	query := `SELECT ` + selectColumns("m", compact) + ` FROM messages m
+		LEFT JOIN message_projections p ON p.messageId = m.id` + activityJoins("m") + ` WHERE 1 = 1`
 	var args []any
 
 	if opts.SessionID != "" {
@@ -911,7 +960,7 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 		args = append(args, opts.N)
 	}
 
-	return d.collect(query, args...)
+	return d.collect(query, compact, args...)
 }
 
 // Search returns messages matching opts.Query, most relevant first.
@@ -927,34 +976,47 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 		match = "{prose} : (" + match + ")"
 	}
 
-	// The window is the slice of recent history to search within: the newest
-	// WindowMessages messages and/or everything inside WindowHours.
-	window := `SELECT rowid FROM messages WHERE 1 = 1`
-	var args []any
-	if opts.SessionID != "" {
-		window += ` AND sessionId = ?`
-		args = append(args, opts.SessionID)
-	} else if opts.ExcludeSessionID != "" {
-		window += ` AND sessionId != ?`
-		args = append(args, opts.ExcludeSessionID)
-	}
-	if opts.WindowHours > 0 {
-		window += ` AND timestamp >= ?`
-		args = append(args, since(opts.WindowHours))
-	}
-	window += ` ORDER BY timestamp DESC`
-	if opts.WindowMessages > 0 {
-		window += ` LIMIT ?`
-		args = append(args, opts.WindowMessages)
-	}
-
+	compact := opts.PreviewLength > 0 && opts.PreviewLength <= maxCompactPreviewLength
 	query := `
-		SELECT ` + selectColumns("m") + `
+		SELECT ` + selectColumns("m", compact) + `
 		FROM messages_fts f
-		JOIN messages m ON m.rowid = f.rowid` + activityJoins("m") + `
-		WHERE f.messages_fts MATCH ?
-		  AND m.rowid IN (` + window + `)`
-	args = append([]any{match}, args...)
+		JOIN messages m ON m.rowid = f.rowid
+		LEFT JOIN message_projections p ON p.messageId = m.id` + activityJoins("m") + `
+		WHERE f.messages_fts MATCH ?`
+	args := []any{match}
+
+	// Restrict the FTS candidates to the latest N rows only when the caller
+	// actually asks for a message-count history window. Unrestricted searches
+	// filter session, exclusion, and age directly on the FTS result rows.
+	if opts.WindowMessages > 0 {
+		window := `SELECT rowid FROM messages WHERE 1 = 1`
+		if opts.SessionID != "" {
+			window += ` AND sessionId = ?`
+			args = append(args, opts.SessionID)
+		} else if opts.ExcludeSessionID != "" {
+			window += ` AND sessionId != ?`
+			args = append(args, opts.ExcludeSessionID)
+		}
+		if opts.WindowHours > 0 {
+			window += ` AND timestamp >= ?`
+			args = append(args, since(opts.WindowHours))
+		}
+		window += ` ORDER BY timestamp DESC LIMIT ?`
+		args = append(args, opts.WindowMessages)
+		query += ` AND m.rowid IN (` + window + `)`
+	} else {
+		if opts.SessionID != "" {
+			query += ` AND m.sessionId = ?`
+			args = append(args, opts.SessionID)
+		} else if opts.ExcludeSessionID != "" {
+			query += ` AND m.sessionId != ?`
+			args = append(args, opts.ExcludeSessionID)
+		}
+		if opts.WindowHours > 0 {
+			query += ` AND m.timestamp >= ?`
+			args = append(args, since(opts.WindowHours))
+		}
+	}
 
 	if opts.Type != "" {
 		query += ` AND m.type = ?`
@@ -967,7 +1029,7 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 		args = append(args, opts.Limit)
 	}
 
-	msgs, err := d.collect(query, args...)
+	msgs, err := d.collect(query, compact, args...)
 	if err != nil && opts.Raw {
 		// The caller wrote this expression, so a failure here is theirs.
 		return nil, fmt.Errorf("%w: %w", ErrBadQuery, err)
@@ -975,7 +1037,7 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 	return msgs, err
 }
 
-func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
+func (d *DB) collect(query string, compact bool, args ...any) ([]transcript.Message, error) {
 	rows, err := d.sql.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -987,14 +1049,14 @@ func (d *DB) collect(query string, args ...any) ([]transcript.Message, error) {
 		var m transcript.Message
 		var calls, results string
 		if err := rows.Scan(&m.ID, &m.EntryID, &m.SessionID, &m.Timestamp, &m.Type,
-			&m.Content, &m.Prose, &m.CharCount, &calls, &results, &m.ActivityID, &m.ActivityRole,
+			&m.Content, &m.Prose, &m.CharCount, &m.ProseCharCount, &calls, &results, &m.ActivityID, &m.ActivityRole,
 			&m.ParentActivityID, &m.ParentSessionID, &m.ChildSessionID); err != nil {
 			return nil, err
 		}
-		if calls != "" {
+		if !compact && calls != "" {
 			_ = json.Unmarshal([]byte(calls), &m.ToolCalls)
 		}
-		if results != "" {
+		if !compact && results != "" {
 			_ = json.Unmarshal([]byte(results), &m.ToolResults)
 		}
 		msgs = append(msgs, m)
@@ -1052,14 +1114,12 @@ func (d *DB) Sessions(opts SessionOptions) ([]SessionSummary, error) {
 	query := `
 		SELECT COALESCE(s.sessionId, ''), COALESCE(s.cwd, ''), COALESCE(s.visibility, ''),
 		       COALESCE(parent.sessionId, NULLIF(s.parentSession, ''), ''),
-		       COALESCE(MAX(m.timestamp), 0),
-		       COALESCE((SELECT CASE WHEN latest.prose != '' THEN latest.prose ELSE latest.content END
-						 FROM messages latest WHERE latest.sourcePath = s.sourcePath
-						 ORDER BY latest.timestamp DESC, latest.rowid DESC LIMIT 1), ''),
-		       COUNT(m.id)
+		       p.latestTimestamp,
+		       CASE WHEN p.latestProsePrefix != '' THEN p.latestProsePrefix ELSE p.latestContentPrefix END,
+		       p.messageCount
 		FROM sessions s
+		JOIN source_projections p ON p.sourcePath = s.sourcePath
 		LEFT JOIN sessions parent ON parent.sourcePath = s.parentSession
-		LEFT JOIN messages m ON m.sourcePath = s.sourcePath
 		WHERE 1 = 1`
 	args := []any{}
 	if opts.CWD != "" {
@@ -1072,14 +1132,13 @@ func (d *DB) Sessions(opts SessionOptions) ([]SessionSummary, error) {
 	}
 	if opts.Query != "" {
 		match := "{prose} : (" + ftsQuery(opts.Query, opts.Any) + ")"
-		query += ` AND EXISTS (
-			SELECT 1 FROM messages_fts f
+		query += ` AND s.sourcePath IN (
+			SELECT matched.sourcePath FROM messages_fts f
 			JOIN messages matched ON matched.rowid = f.rowid
-			WHERE matched.sourcePath = s.sourcePath AND f.messages_fts MATCH ?)`
+			WHERE f.messages_fts MATCH ?)`
 		args = append(args, match)
 	}
-	query += ` GROUP BY s.sourcePath, s.sessionId, s.cwd, s.visibility, s.parentSession, parent.sessionId
-		ORDER BY MAX(m.timestamp) DESC, s.sessionId`
+	query += ` ORDER BY p.latestTimestamp DESC, s.sessionId`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
@@ -1247,152 +1306,100 @@ type CommandRecord struct {
 	Output    string
 }
 
-// Commands returns tool calls ordered newest first. Tool results are paired by
-// their durable tool-call id; old records without ids fall back to a nearby
-// message in the same session. Only messages matching Query are read from the
-// FTS index; nearby rows are fetched on demand, rather than scanning every
-// tool record in the corpus.
+// Commands returns indexed tool invocations newest first. FTS hits on either
+// the invocation or a linked result select the invocation; output text is only
+// read for selected invocations when IncludeOutput is requested.
 func (d *DB) Commands(opts CommandOptions) ([]CommandRecord, error) {
-	var candidates []transcript.Message
+	if opts.Query != "" && ftsQuery(opts.Query, false) == "" {
+		return []CommandRecord{}, nil
+	}
+	query := `SELECT i.invocationId, i.toolName, i.arguments, i.sessionId, i.messageId, i.timestamp
+		FROM tool_invocations i WHERE 1 = 1`
+	args := []any{}
 	if opts.Query != "" {
-		var err error
-		// A command result is discovered through either its call or its
-		// paired output. Overfetch a bounded number of FTS hits so a small
-		// command limit does not require materializing every prose match.
-		candidateLimit := 0
-		if opts.Limit > 0 {
-			candidateLimit = opts.Limit * 16
-			if candidateLimit < 256 {
-				candidateLimit = 256
-			}
-		}
-		candidates, err = d.Search(SearchOptions{Query: opts.Query, Limit: candidateLimit, SessionID: opts.SessionID, ProseOnly: false})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		var err error
-		candidates, err = d.collect(`SELECT ` + selectColumns("m") + ` FROM messages m` + activityJoins("m") +
-			` WHERE m.toolCalls != '' OR m.toolResults != ''
-			ORDER BY m.sessionId, m.timestamp, m.rowid`)
-		if err != nil {
-			return nil, err
-		}
+		match := ftsQuery(opts.Query, false)
+		query = `WITH matched_messages AS (
+			SELECT m.id FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
+			WHERE f.messages_fts MATCH ?)
+		` + query
+		args = append(args, match)
+		query += ` AND (i.messageId IN (SELECT id FROM matched_messages)
+			OR i.invocationId IN (SELECT r.invocationId FROM tool_results r
+				JOIN matched_messages mm ON mm.id = r.messageId WHERE r.invocationId IS NOT NULL))`
 	}
-
-	type call struct {
+	if opts.SessionID != "" {
+		query += ` AND i.sessionId = ?`
+		args = append(args, opts.SessionID)
+	}
+	if opts.Tool != "" {
+		query += ` AND lower(i.toolName) = lower(?)`
+		args = append(args, opts.Tool)
+	}
+	query += ` ORDER BY i.timestamp DESC, i.messageId, i.invocationId`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	rows, err := d.sql.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	type selectedCall struct {
+		id     int64
 		record CommandRecord
-		id     string
 	}
-	callsByID := map[string]*call{}
-	matchedCalls := map[*call]bool{}
-	pendingResults := []struct {
-		message transcript.Message
-		result  transcript.ToolResult
-	}{}
-	addCall := func(message transcript.Message, tool transcript.ToolCall) *call {
-		if opts.Tool != "" && !strings.EqualFold(opts.Tool, tool.Name) {
-			return nil
+	selected := []selectedCall{}
+	for rows.Next() {
+		var item selectedCall
+		if err := rows.Scan(&item.id, &item.record.Tool, &item.record.Arguments,
+			&item.record.SessionID, &item.record.MessageID, &item.record.Timestamp); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		key := messageKey(message) + "\x00" + tool.ID
-		if existing := callsByID[key]; existing != nil {
-			return existing
-		}
-		item := &call{record: CommandRecord{Tool: tool.Name, Arguments: tool.Arguments,
-			SessionID: message.SessionID, MessageID: message.ID, Timestamp: message.Timestamp}, id: tool.ID}
-		if tool.ID != "" {
-			callsByID[key] = item
-			// This secondary map is filled below with the session-scoped id.
-			callsByID[message.SessionID+"\x00"+tool.ID] = item
-		}
-		return item
+		selected = append(selected, item)
 	}
-	for _, message := range candidates {
-		if opts.SessionID != "" && message.SessionID != opts.SessionID {
-			continue
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if !opts.IncludeOutput || len(selected) == 0 {
+		out := make([]CommandRecord, 0, len(selected))
+		for _, item := range selected {
+			out = append(out, item.record)
 		}
-		for _, tool := range message.ToolCalls {
-			if item := addCall(message, tool); item != nil {
-				matchedCalls[item] = true
-			}
-		}
-		for _, result := range message.ToolResults {
-			pendingResults = append(pendingResults, struct {
-				message transcript.Message
-				result  transcript.ToolResult
-			}{message, result})
-		}
+		return out, nil
 	}
 
-	for _, pending := range pendingResults {
-		item := callsByID[pending.message.SessionID+"\x00"+pending.result.ID]
-		if item == nil {
-			nearby, err := d.toolMessagesBefore(pending.message.SessionID, pending.message.Timestamp)
-			if err != nil {
+	outputQuery, err := d.sql.Prepare(`SELECT content FROM tool_results
+		WHERE invocationId = ? ORDER BY timestamp, resultId`)
+	if err != nil {
+		return nil, err
+	}
+	defer outputQuery.Close()
+	out := make([]CommandRecord, 0, len(selected))
+	for _, item := range selected {
+		resultRows, err := outputQuery.Query(item.id)
+		if err != nil {
+			return nil, err
+		}
+		for resultRows.Next() {
+			var content string
+			if err := resultRows.Scan(&content); err != nil {
+				resultRows.Close()
 				return nil, err
 			}
-			for _, message := range nearby {
-				for _, tool := range message.ToolCalls {
-					if pending.result.ID == "" || tool.ID == pending.result.ID {
-						item = addCall(transcript.Message{ID: message.ID, SessionID: message.SessionID, Timestamp: message.Timestamp}, tool)
-						if item != nil {
-							break
-						}
-					}
-				}
-				if item != nil {
-					break
-				}
-			}
+			appendToolOutput(&item.record, content)
 		}
-		if item == nil {
-			continue
+		if err := resultRows.Err(); err != nil {
+			resultRows.Close()
+			return nil, err
 		}
-		matchedCalls[item] = true
-		if opts.IncludeOutput {
-			appendToolOutput(&item.record, pending.result.Content)
+		if err := resultRows.Close(); err != nil {
+			return nil, err
 		}
-	}
-
-	items := make([]*call, 0, len(matchedCalls))
-	for item := range matchedCalls {
-		items = append(items, item)
-	}
-	slices.SortFunc(items, func(a, b *call) int {
-		if a.record.Timestamp != b.record.Timestamp {
-			if a.record.Timestamp > b.record.Timestamp {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.record.MessageID, b.record.MessageID)
-	})
-	if opts.Limit > 0 && len(items) > opts.Limit {
-		items = items[:opts.Limit]
-	}
-	if opts.IncludeOutput {
-		for _, item := range items {
-			// A result that matched the query was already attached above. The
-			// forward lookup is only needed when the call itself matched.
-			if item.record.Output != "" {
-				continue
-			}
-			nearby, err := d.toolMessagesAfter(item.record.SessionID, item.record.Timestamp)
-			if err != nil {
-				return nil, err
-			}
-			for _, message := range nearby {
-				for _, result := range message.ToolResults {
-					if item.id == "" || result.ID == item.id {
-						appendToolOutput(&item.record, result.Content)
-					}
-				}
-			}
-		}
-	}
-
-	out := make([]CommandRecord, 0, len(items))
-	for _, item := range items {
 		out = append(out, item.record)
 	}
 	return out, nil
@@ -1406,47 +1413,6 @@ func appendToolOutput(record *CommandRecord, content string) {
 		record.Output += "\n"
 	}
 	record.Output += content
-}
-
-type toolMessage struct {
-	ID          string
-	SessionID   string
-	Timestamp   int64
-	ToolCalls   []transcript.ToolCall
-	ToolResults []transcript.ToolResult
-}
-
-func (d *DB) toolMessagesBefore(sessionID string, timestamp int64) ([]toolMessage, error) {
-	return d.toolMessages(`m.timestamp <= ? ORDER BY m.timestamp DESC, m.rowid DESC`, sessionID, timestamp)
-}
-
-func (d *DB) toolMessagesAfter(sessionID string, timestamp int64) ([]toolMessage, error) {
-	return d.toolMessages(`m.timestamp >= ? ORDER BY m.timestamp ASC, m.rowid ASC`, sessionID, timestamp)
-}
-
-func (d *DB) toolMessages(order string, sessionID string, timestamp int64) ([]toolMessage, error) {
-	rows, err := d.sql.Query(`SELECT m.id, m.sessionId, m.timestamp, m.toolCalls, m.toolResults
-		FROM messages m WHERE m.sessionId = ? AND (m.toolCalls != '' OR m.toolResults != '') AND `+order+` LIMIT 64`, sessionID, timestamp)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []toolMessage{}
-	for rows.Next() {
-		var message toolMessage
-		var calls, results string
-		if err := rows.Scan(&message.ID, &message.SessionID, &message.Timestamp, &calls, &results); err != nil {
-			return nil, err
-		}
-		if calls != "" {
-			_ = json.Unmarshal([]byte(calls), &message.ToolCalls)
-		}
-		if results != "" {
-			_ = json.Unmarshal([]byte(results), &message.ToolResults)
-		}
-		out = append(out, message)
-	}
-	return out, rows.Err()
 }
 
 func messageKey(msg transcript.Message) string { return msg.SessionID + "\x00" + msg.ID }
@@ -1610,20 +1576,20 @@ func (d *DB) Around(id string, before, after int, proseOnly bool) ([]transcript.
 	}
 
 	// Ties on timestamp are broken by rowid, which follows transcript order.
-	earlier, err := d.collect(`SELECT `+selectColumns("m")+` FROM messages m`+activityJoins("m")+`
+	earlier, err := d.collect(`SELECT `+selectColumns("m", false)+` FROM messages m LEFT JOIN message_projections p ON p.messageId = m.id`+activityJoins("m")+`
 		WHERE m.sessionId = ?
 		  AND (m.timestamp < ? OR (m.timestamp = ? AND m.rowid < ?))`+filter+`
-		ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ?`,
+		ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ?`, false,
 		target.SessionID, target.Timestamp, target.Timestamp, rowid, before)
 	if err != nil {
 		return nil, err
 	}
 	slices.Reverse(earlier)
 
-	later, err := d.collect(`SELECT `+selectColumns("m")+` FROM messages m`+activityJoins("m")+`
+	later, err := d.collect(`SELECT `+selectColumns("m", false)+` FROM messages m LEFT JOIN message_projections p ON p.messageId = m.id`+activityJoins("m")+`
 		WHERE m.sessionId = ?
 		  AND (m.timestamp > ? OR (m.timestamp = ? AND m.rowid > ?))`+filter+`
-		ORDER BY m.timestamp ASC, m.rowid ASC LIMIT ?`,
+		ORDER BY m.timestamp ASC, m.rowid ASC LIMIT ?`, false,
 		target.SessionID, target.Timestamp, target.Timestamp, rowid, after)
 	if err != nil {
 		return nil, err
@@ -1638,14 +1604,14 @@ func (d *DB) Around(id string, before, after int, proseOnly bool) ([]transcript.
 // resolve turns an exact id or a unique prefix into one message.
 func (d *DB) resolve(id string) (transcript.Message, int64, error) {
 	var rowid int64
-	msgs, err := d.collect(`SELECT `+selectColumns("m")+` FROM messages m`+activityJoins("m")+` WHERE m.id = ?`, id)
+	msgs, err := d.collect(`SELECT `+selectColumns("m", false)+` FROM messages m LEFT JOIN message_projections p ON p.messageId = m.id`+activityJoins("m")+` WHERE m.id = ?`, false, id)
 	if err != nil {
 		return transcript.Message{}, 0, err
 	}
 	if len(msgs) == 0 {
 		// Fall back to prefix matching, fetching two rows to spot ambiguity.
-		msgs, err = d.collect(`SELECT `+selectColumns("m")+` FROM messages m`+activityJoins("m")+`
-			WHERE m.id LIKE ? ESCAPE '\' ORDER BY m.id LIMIT 2`, escapeLike(id)+"%")
+		msgs, err = d.collect(`SELECT `+selectColumns("m", false)+` FROM messages m LEFT JOIN message_projections p ON p.messageId = m.id`+activityJoins("m")+`
+			WHERE m.id LIKE ? ESCAPE '\' ORDER BY m.id LIMIT 2`, false, escapeLike(id)+"%")
 		if err != nil {
 			return transcript.Message{}, 0, err
 		}

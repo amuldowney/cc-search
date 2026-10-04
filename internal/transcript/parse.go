@@ -12,14 +12,15 @@ import (
 
 // Message is a single indexable message extracted from a transcript line.
 type Message struct {
-	ID        string
-	EntryID   string // original transcript entry id, before any index disambiguation
-	SessionID string
-	Timestamp int64 // unix milliseconds
-	Type      string
-	Content   string
-	Prose     string // just what was said: text blocks, no tool calls or results
-	CharCount int
+	ID             string
+	EntryID        string // original transcript entry id, before any index disambiguation
+	SessionID      string
+	Timestamp      int64 // unix milliseconds
+	Type           string
+	Content        string
+	Prose          string // just what was said: text blocks, no tool calls or results
+	CharCount      int    // original UTF-8 byte length of Content
+	ProseCharCount int    // original UTF-8 byte length of Prose
 
 	// ToolCalls and ToolResults retain the structured tool records that are
 	// otherwise flattened into Content. They let command history pair an exact
@@ -287,18 +288,19 @@ func (p *Parser) ParseLine(line []byte) (Message, bool) {
 	activityID, activityRole := activityFromDetails(messageDetails,
 		rec.Type == "custom_message" && rec.CustomType == "subagent-notification")
 	return Message{
-		ID:           id,
-		EntryID:      id,
-		SessionID:    sessionID,
-		Timestamp:    ts.UnixMilli(),
-		Type:         typ,
-		Content:      content,
-		Prose:        prose,
-		CharCount:    len(content),
-		ToolCalls:    calls,
-		ToolResults:  results,
-		ActivityID:   activityID,
-		ActivityRole: activityRole,
+		ID:             id,
+		EntryID:        id,
+		SessionID:      sessionID,
+		Timestamp:      ts.UnixMilli(),
+		Type:           typ,
+		Content:        content,
+		Prose:          prose,
+		CharCount:      len(content),
+		ProseCharCount: len(prose),
+		ToolCalls:      calls,
+		ToolResults:    results,
+		ActivityID:     activityID,
+		ActivityRole:   activityRole,
 	}, true
 }
 
@@ -398,7 +400,7 @@ func parseJevModelChoice(rec record, sessionID string) (Message, bool) {
 	return Message{
 		ID: rec.ID, EntryID: rec.ID, SessionID: sessionID,
 		Timestamp: ts.UnixMilli(), Type: "custom", Content: prose, Prose: prose,
-		CharCount: len(prose), ActivityID: data.ActivityID,
+		CharCount: len(prose), ProseCharCount: len(prose), ActivityID: data.ActivityID,
 	}, true
 }
 

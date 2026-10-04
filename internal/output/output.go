@@ -244,7 +244,10 @@ func Format(msgs []transcript.Message, opts Options) Response {
 			CharCount:        m.CharCount,
 		}
 		if opts.UseProse {
-			r.CharCount = len(m.Prose)
+			r.CharCount = m.ProseCharCount
+			if r.CharCount == 0 && m.Prose != "" {
+				r.CharCount = len(m.Prose)
+			}
 		}
 		if opts.Full {
 			r.Content = body
