@@ -246,7 +246,11 @@ func shouldRebuild(err error) bool {
 }
 
 func open(path string) (*DB, error) {
-	handle, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
+	dsn, err := sqliteDSN(path, false)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}

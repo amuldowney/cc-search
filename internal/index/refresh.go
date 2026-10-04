@@ -274,7 +274,7 @@ func openForRefresh(path string) (*DB, error) {
 
 func validateReaderSchema(handle *sql.DB) error {
 	var missing []string
-	for _, table := range []string{"messages", "messages_fts", "sessions", "activities", "files"} {
+	for _, table := range []string{"messages", "messages_fts", "sessions", "activities", "files", "message_projections", "source_projections", "tool_invocations", "tool_results"} {
 		var count int
 		if err := handle.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = ? AND type IN ('table','view')`, table).Scan(&count); err != nil {
 			return fmt.Errorf("validate index schema: %w", err)
@@ -284,20 +284,26 @@ func validateReaderSchema(handle *sql.DB) error {
 		}
 	}
 	if len(missing) != 0 {
-		return fmt.Errorf("%w: index schema is missing required tables", ErrNeedsRefresh)
+		return fmt.Errorf("index schema is missing required tables (%v); stop clients, remove the derived database and its WAL/SHM sidecars, then run cc-search refresh", missing)
 	}
 	return nil
 }
 
 func readOnlyDSN(path string) (string, error) {
+	return sqliteDSN(path, true)
+}
+
+func sqliteDSN(path string, readOnly bool) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve index path: %w", err)
 	}
 	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
 	query := url.Values{}
-	query.Set("mode", "ro")
-	query.Set("_query_only", "1")
+	if readOnly {
+		query.Set("mode", "ro")
+		query.Set("_query_only", "1")
+	}
 	query.Set("_busy_timeout", "5000")
 	return u.String() + "?" + query.Encode(), nil
 }
