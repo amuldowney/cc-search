@@ -284,9 +284,28 @@ func (f *commonFlags) outputOptions(truncated bool) output.Options {
 	}
 }
 
-// openIndex reads the established snapshot without waiting on a writer.
-// Missing indexes/root profiles bootstrap once; --refresh explicitly waits.
+// openIndex retains the writable, synchronized opener for mutation commands.
+// Read commands use openReadIndex instead; a writer callback must never receive
+// a pinned read-only connection (for example per-session maintenance/rebuild).
 func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
+	db, err := index.Open(cfg.IndexPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range cfg.TranscriptDirs {
+		if _, err := db.Sync(root); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, closeIndexWithError(db, err)
+		}
+	}
+	if err := db.ReleaseLifecycleLock(); err != nil {
+		return nil, closeIndexWithError(db, err)
+	}
+	return db, nil
+}
+
+// openReadIndex reads the established snapshot without waiting on a writer.
+// Missing indexes/root profiles bootstrap once; --refresh explicitly waits.
+func openReadIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 	return openIndexMode(cfg, stderr, false)
 }
 
@@ -339,7 +358,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	}
 
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -384,7 +403,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	}
 
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -476,7 +495,7 @@ func runSessions(args []string, cfg Config, stdout, stderr io.Writer) (err error
 		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
 	}
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -517,7 +536,7 @@ func runActivities(args []string, cfg Config, stdout, stderr io.Writer) (err err
 		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
 	}
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -549,7 +568,7 @@ func runActivity(args []string, cfg Config, stdout, stderr io.Writer) (err error
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
 	}
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -590,7 +609,7 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 		return fmt.Errorf("%w: --any has no meaning for a --raw query; write OR yourself", errUsage)
 	}
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -683,7 +702,7 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
 	}
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -1005,7 +1024,7 @@ func runRead(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	}
 
 	cfg = f.resolve(cfg)
-	db, err := openIndex(cfg, stderr)
+	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
 		return err
 	}
