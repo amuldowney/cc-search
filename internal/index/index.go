@@ -260,7 +260,7 @@ func open(path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("check schema contents: %w", err)
 	}
-	if version != schemaVersion && !empty {
+	if version != schemaVersion && version != 7 && !empty {
 		handle.Close()
 		if version > schemaVersion {
 			return nil, fmt.Errorf("%w: index has schema version %d, but this binary supports %d; deploy a newer cc-search",
@@ -280,6 +280,12 @@ func open(path string) (*DB, error) {
 		if _, err := handle.Exec(`PRAGMA journal_mode = WAL`); err != nil {
 			handle.Close()
 			return nil, fmt.Errorf("enable WAL: %w", err)
+		}
+	}
+	if version == 7 && !empty {
+		if err := migrateReadProjections(handle); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("migrate read projections: %w", err)
 		}
 	}
 	if empty {
