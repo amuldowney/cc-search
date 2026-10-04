@@ -72,7 +72,9 @@ cc-search last 30 --session SESSION_ID
 | Installation/index health | `info` or `doctor` |
 
 Use `--full` only after selecting a useful hit. Large tool results can consume
-a context window quickly. The default output budget is 60,000 characters;
+a context window quickly. Search defaults to 20 hits; `--limit 0` explicitly
+requests unlimited hits. The default output budget is 60,000 body characters
+(not JSON bytes);
 `--budget N` lowers it and `--budget 0` disables the cap.
 
 ## Search semantics

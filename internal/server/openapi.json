@@ -547,10 +547,11 @@
       "Limit": {
         "name": "limit",
         "in": "query",
+        "description": "Maximum results (default 20); 0 explicitly requests unlimited results.",
         "schema": {
           "type": "integer",
           "minimum": 0,
-          "default": 0
+          "default": 20
         }
       },
       "Count": {

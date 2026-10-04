@@ -72,7 +72,7 @@ commands:
        [--index PATH] [--transcripts DIR]
 
 search options:
-  --limit N             maximum results returned
+  --limit N             maximum results returned (default 20; 0 = unlimited)
   --window-messages M   only search the newest M messages
   --window-hours H      only search the last H hours
   --session ID          restrict to one session
@@ -333,7 +333,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 
 func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("search", stderr)
-	limit := f.set.Int("limit", 0, "maximum results returned")
+	limit := f.set.Int("limit", index.DefaultSearchLimit, "maximum results returned (0 = unlimited)")
 	windowMessages := f.set.Int("window-messages", 0, "only search the newest M messages")
 	windowHours := f.set.Int("window-hours", 0, "only search the last H hours")
 	msgType := f.set.String("type", "", "restrict to a message type")

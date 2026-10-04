@@ -121,7 +121,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", "pattern is required")
 		return
 	}
-	limit, err := nonNegativeInt(q, "limit", 0)
+	limit, err := nonNegativeInt(q, "limit", index.DefaultSearchLimit)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return

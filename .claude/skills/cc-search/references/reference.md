@@ -49,7 +49,7 @@ command is `read`, which returns its context oldest first.
 ### `search`
 
 ```text
---limit N             maximum results; 0 means no limit
+--limit N             maximum results, default 20; 0 means no limit
 --window-messages M   search only the newest M messages
 --window-hours H      search only the last H hours
 --session ID          restrict to one session

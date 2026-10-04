@@ -128,6 +128,11 @@ explicit `--session ID` always selects that session.
 
 ## Output and context budgets
 
+Search returns at most **20 hits** by default; `--limit N` changes the limit
+and `--limit 0` explicitly requests unlimited hits. The API uses the same default
+and `limit=0` opt-out. `truncated: true` signals that more hits were available.
+The character budget below limits message bodies, not JSON metadata or bytes.
+
 Compact results contain `id`, `sessionId`, `timestamp`, `type`, `preview`, and
 `charCount`. `--full` emits the complete `content` instead of a preview.
 `--preview-length` changes compact previews. The default output budget is
