@@ -7,5 +7,5 @@ import (
 )
 
 func main() {
-	os.Exit(cli.Run(os.Args[1:], cli.Config{}, os.Stdout, os.Stderr))
+	os.Exit(cli.Run(os.Args[1:], cli.Config{StartRefresh: cli.StartBackgroundRefresh}, os.Stdout, os.Stderr))
 }

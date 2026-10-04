@@ -67,6 +67,10 @@ cc-search sessions "deploy system" --limit 10
 cc-search activities --status failed
 cc-search activity ACTIVITY_ID --full
 
+# Wait for the newest transcripts, or inspect snapshot freshness.
+cc-search search "authentication redirect" --refresh
+cc-search refresh
+
 # Diagnose the installation or rebuild derived data.
 cc-search info
 cc-search doctor
@@ -78,8 +82,7 @@ message or activity ID is accepted by `read` and `activity`.
 
 ## What is indexed
 
-By default, each invocation recursively indexes the transcript roots that
-exist in the current home directory:
+The index covers these transcript roots in the current home directory:
 
 - `~/.claude/projects` — Claude Code JSONL transcripts
 - `~/.pi/agent/sessions` — pi session JSONL transcripts, including linked child
@@ -126,6 +129,31 @@ When run inside pi, search excludes the current pi session by default because
 it is already in the caller's context. `--include-current` restores it, and an
 explicit `--session ID` always selects that session.
 
+## Snapshot freshness
+
+Normal reads use the existing SQLite snapshot immediately, without waiting for
+transcript indexing. They request a coalesced background refresh when the last
+successful refresh is older than 30 seconds; attempts are throttled to once per
+30 seconds and skip an already-active writer. **This is an opportunistic
+refresh policy, not a 30-second freshness guarantee:** after an idle period the
+first query can return an older snapshot while refresh runs.
+
+Use `--refresh` on a read command, or `cc-search refresh`, to wait for the latest
+transcripts. First-time indexing, schema upgrades, and new transcript-root
+profiles also wait before returning results. `refresh` accepts repeated
+`--transcripts DIR` flags to refresh an explicit set of roots. Normal read
+commands retain their single-root override.
+
+`cc-search info` includes `freshness.lastSuccess`, `lastAttempt` (Unix
+milliseconds), `stale`, and an optional sanitized `error`. Failed background
+refreshes do not advance `lastSuccess` or make an existing snapshot unavailable.
+Use explicit refresh to receive the underlying indexing error. WAL readers stay
+available during refresh; transcript replacements publish transactionally.
+
+CLI refresh children have detached, null stdio, so they cannot hold a tool call
+open. No always-on daemon is required. The HTTP service uses a single-flight
+background worker instead. `doctor` checks the current snapshot; add `--refresh` to synchronize first.
+
 ## Output and context budgets
 
 Search returns at most **20 hits** by default; `--limit N` changes the limit
@@ -146,6 +174,11 @@ The budget shapes output rather than blindly truncating JSON:
 - every response reports `budget.limit`, `budget.spent`, `budget.dropped`, and
   `budget.shrunk`
 
+Session summaries, compact search/recent-message previews (up to 512 characters),
+and tool-call/result links are built at indexing time. Full content and larger
+custom previews remain available. `commands` returns the newest matching calls;
+it no longer drops newer low-relevance matches through an intermediate FTS cap.
+
 `context` first selects relevant hits and then returns a deduplicated,
 chronological expansion. Each expanded result identifies the search hits that
 caused it to be included.
@@ -163,8 +196,9 @@ curl http://127.0.0.1:8765/openapi.json
 
 The service binds only to localhost or another loopback address; it has no
 remote authentication boundary and must not be exposed to a network interface.
-It synchronizes changed transcripts before data operations and serializes
-lifecycle operations with queries.
+It uses the same snapshot-first policy as the CLI. Pass `refresh=true` on a read
+request or `POST /v1/refresh` to wait for current transcripts. Read requests are
+not serialized behind refresh or rebuild writers.
 
 The versioned endpoints cover health, search, recent messages, contextual
 reads, sessions, pi activities, exact tool commands, diagnostics, and rebuild:
@@ -181,6 +215,7 @@ reads, sessions, pi activities, exact tool commands, diagnostics, and rebuild:
 - `/v1/info`
 - `/v1/doctor`
 - `/v1/rebuild`
+- `/v1/refresh`
 
 The checked-in OpenAPI document is
 [`openapi/cc-search.json`](openapi/cc-search.json), and is also served at

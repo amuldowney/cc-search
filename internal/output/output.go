@@ -118,18 +118,19 @@ type ContextResult struct {
 
 // InfoResponse reports index and executable diagnostics.
 type InfoResponse struct {
-	IndexPath      string   `json:"indexPath"`
-	SchemaVersion  int      `json:"schemaVersion"`
-	MessageCount   int      `json:"messageCount"`
-	SessionCount   int      `json:"sessionCount"`
-	ActivityCount  int      `json:"activityCount"`
-	FileCount      int      `json:"fileCount"`
-	Sources        []Source `json:"sources,omitempty"`
-	BinaryPath     string   `json:"binaryPath"`
-	BinaryVersion  string   `json:"binaryVersion"`
-	CurrentSession string   `json:"currentSession"`
-	IndexHealthy   bool     `json:"indexHealthy"`
-	LockHealthy    bool     `json:"lockHealthy"`
+	Freshness      *Freshness `json:"freshness,omitempty"`
+	IndexPath      string     `json:"indexPath"`
+	SchemaVersion  int        `json:"schemaVersion"`
+	MessageCount   int        `json:"messageCount"`
+	SessionCount   int        `json:"sessionCount"`
+	ActivityCount  int        `json:"activityCount"`
+	FileCount      int        `json:"fileCount"`
+	Sources        []Source   `json:"sources,omitempty"`
+	BinaryPath     string     `json:"binaryPath"`
+	BinaryVersion  string     `json:"binaryVersion"`
+	CurrentSession string     `json:"currentSession"`
+	IndexHealthy   bool       `json:"indexHealthy"`
+	LockHealthy    bool       `json:"lockHealthy"`
 }
 
 type Source struct {

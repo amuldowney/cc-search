@@ -67,6 +67,7 @@ commands:
   commands PATTERN [options]            retrieve exact historical tool calls
   info [--sources]                     show index and installation details
   doctor                                check index and installation health
+  refresh                              synchronously index changed transcripts
   rebuild [--session ID]                discard and rebuild the index
   serve [--host 127.0.0.1] [--port N]  serve the local OpenAPI HTTP API
        [--index PATH] [--transcripts DIR]
@@ -118,6 +119,7 @@ output options (last, search, read and context):
   --budget N            cap total output characters (default 60000, 0 = off)
   --index PATH          index database to use
   --transcripts DIR     transcript directory to index
+  --refresh             wait for fresh transcripts before reading the snapshot
 `
 
 // Config supplies the paths the commands operate on. Empty fields fall back to
@@ -125,6 +127,10 @@ output options (last, search, read and context):
 type Config struct {
 	IndexPath      string
 	TranscriptDirs []string
+	Refresh        bool
+	// StartRefresh is supplied by the executable, not library/test callers.
+	// It must detach refresh work without inheriting request stdio.
+	StartRefresh func(string, []string) error
 }
 
 func (c Config) withDefaults() Config {
@@ -183,6 +189,8 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 		err = runInfo(rest, cfg, stdout, stderr)
 	case "doctor":
 		err = runDoctor(rest, cfg, stdout, stderr)
+	case "refresh":
+		err = runRefresh(rest, cfg, stdout, stderr)
 	case "rebuild":
 		err = runRebuild(rest, cfg, stdout, stderr)
 	case "serve":
@@ -226,6 +234,7 @@ type commonFlags struct {
 	budget        int
 	indexPath     string
 	transcriptDir string
+	refresh       bool
 }
 
 func newFlagSet(name string, stderr io.Writer) *commonFlags {
@@ -238,12 +247,14 @@ func newFlagSet(name string, stderr io.Writer) *commonFlags {
 	set.StringVar(&f.indexPath, "index", "", "index database to use")
 	set.StringVar(&f.transcriptDir, "transcripts", "", "transcript directory to index")
 	set.BoolVar(&f.all, "all", false, "include tool calls and their output")
+	set.BoolVar(&f.refresh, "refresh", false, "wait for fresh transcripts before reading")
 	set.IntVar(&f.budget, "budget", DefaultBudget, "cap total output characters (0 = unlimited)")
 	return f
 }
 
 // resolve merges path overrides from flags into the config.
 func (f *commonFlags) resolve(cfg Config) Config {
+	cfg.Refresh = cfg.Refresh || f.refresh
 	if f.indexPath != "" {
 		cfg.IndexPath = f.indexPath
 	}
@@ -251,6 +262,16 @@ func (f *commonFlags) resolve(cfg Config) Config {
 		cfg.TranscriptDirs = []string{f.transcriptDir}
 	}
 	return cfg.withDefaults()
+}
+
+func (f *commonFlags) indexPreviewLength() int {
+	if f.full {
+		return 0
+	}
+	if f.previewLength <= 0 {
+		return output.DefaultPreviewLength
+	}
+	return f.previewLength
 }
 
 func (f *commonFlags) outputOptions(truncated bool) output.Options {
@@ -263,9 +284,8 @@ func (f *commonFlags) outputOptions(truncated bool) output.Options {
 	}
 }
 
-// openIndex opens the index and brings it up to date with the transcripts on
-// disk. Missing transcript directories are expected when an agent is not
-// installed, so they are silent during normal operations.
+// openIndex reads the established snapshot without waiting on a writer.
+// Missing indexes/root profiles bootstrap once; --refresh explicitly waits.
 func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 	return openIndexMode(cfg, stderr, false)
 }
@@ -273,23 +293,25 @@ func openIndex(cfg Config, stderr io.Writer) (*index.DB, error) {
 // openIndexMode is the shared opener used by normal commands and doctor.
 // reportMissing lets doctor surface absent roots without polluting every query.
 func openIndexMode(cfg Config, stderr io.Writer, reportMissing bool) (*index.DB, error) {
-	db, err := index.Open(cfg.IndexPath)
+	db, err := index.OpenSnapshot(cfg.IndexPath, cfg.TranscriptDirs, cfg.Refresh)
 	if err != nil {
 		return nil, err
 	}
-	for _, dir := range cfg.TranscriptDirs {
-		if _, err := db.Sync(dir); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				if reportMissing {
-					fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
-				}
-			} else {
-				return nil, closeIndexWithError(db, err)
+	if reportMissing {
+		for _, dir := range cfg.TranscriptDirs {
+			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+				fmt.Fprintf(stderr, "cc-search: warning: %v\n", err)
 			}
 		}
 	}
-	if err := db.ReleaseLifecycleLock(); err != nil {
+	status, err := db.Freshness(cfg.TranscriptDirs)
+	if err != nil {
 		return nil, closeIndexWithError(db, err)
+	}
+	if cfg.StartRefresh != nil && status.Stale && time.Since(time.UnixMilli(status.LastAttempt)) >= index.RefreshInterval {
+		if err := cfg.StartRefresh(cfg.IndexPath, cfg.TranscriptDirs); err != nil {
+			fmt.Fprintln(stderr, "cc-search: background refresh could not start; run cc-search refresh")
+		}
 	}
 	return db, nil
 }
@@ -324,7 +346,7 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	msgs, err := db.Last(index.LastOptions{
-		N: count, Hours: *hours, SessionID: f.session, Type: *msgType, ProseOnly: !f.all})
+		N: count, Hours: *hours, SessionID: f.session, Type: *msgType, ProseOnly: !f.all, PreviewLength: f.indexPreviewLength()})
 	if err != nil {
 		return err
 	}
@@ -381,6 +403,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	}
 	search := index.SearchOptions{
 		Query:            pattern,
+		PreviewLength:    f.indexPreviewLength(),
 		Limit:            queryLimit,
 		WindowMessages:   *windowMessages,
 		WindowHours:      *windowHours,
@@ -583,7 +606,7 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 	}
 	search := index.SearchOptions{Query: pattern, Limit: queryLimit, SessionID: f.session,
 		ExcludeSessionID: excludeSession, Type: *msgType,
-		ProseOnly: !f.all, Any: *any, Raw: *raw}
+		ProseOnly: !f.all, Any: *any, Raw: *raw, PreviewLength: f.indexPreviewLength()}
 	selected, err := db.Search(search)
 	if err != nil {
 		if errors.Is(err, index.ErrBadQuery) {
@@ -717,7 +740,7 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	checks := []output.DoctorCheck{
 		{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath},
 		{Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)},
-		{Name: "lock", OK: info.LockHealthy, Detail: "lifecycle lock acquired"},
+		{Name: "lock", OK: info.LockHealthy, Detail: "snapshot opened without acquiring writer lock"},
 	}
 	ok := true
 	for _, check := range checks {
@@ -768,6 +791,11 @@ func diagnosticInfo(cfg Config, stderr io.Writer, verify, includeSources bool) (
 	for _, source := range sources {
 		info.Sources = append(info.Sources, output.Source{Path: source.Path, MessageCount: source.MessageCount, SessionCount: source.SessionCount})
 	}
+	status, err := db.Freshness(cfg.TranscriptDirs)
+	if err != nil {
+		return info, err
+	}
+	info.Freshness = &output.Freshness{LastSuccess: status.LastSuccess, LastAttempt: status.LastAttempt, Stale: status.Stale, Error: status.Error}
 	return info, nil
 }
 

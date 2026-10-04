@@ -450,7 +450,7 @@ func TestSessionFlagFiltersResults(t *testing.T) {
 	}
 }
 
-func TestOpenIndexJoinsSyncAndCloseErrors(t *testing.T) {
+func TestOpenIndexReturnsBootstrapError(t *testing.T) {
 	root := t.TempDir()
 	transcripts := filepath.Join(root, "transcripts")
 	if err := os.Mkdir(transcripts, 0o755); err != nil {
@@ -461,24 +461,29 @@ func TestOpenIndexJoinsSyncAndCloseErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	closeErr := errors.New("release lifecycle lock: injected test failure")
-	previous := closeIndex
-	closeIndex = func(db *index.DB) error {
-		return errors.Join(db.Close(), closeErr)
-	}
-	t.Cleanup(func() { closeIndex = previous })
-
 	_, err := openIndex(Config{
 		IndexPath: filepath.Join(root, "index.db"), TranscriptDirs: []string{transcripts},
 	}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("openIndex succeeded despite an oversized transcript")
 	}
-	if !errors.Is(err, closeErr) {
-		t.Fatalf("openIndex error = %v, want release error too", err)
-	}
 	if !strings.Contains(err.Error(), "token too long") {
 		t.Fatalf("openIndex error = %v, want sync error too", err)
+	}
+}
+
+// Writer cleanup is now owned by index.Refresh. The CLI still owns and must
+// join cleanup failures for the read-only handle returned to each command.
+func TestRunSearchJoinsQueryAndCloseErrors(t *testing.T) {
+	cfg := fixture(t, []msg{{"user", "needle", 1}})
+	closeErr := errors.New("injected reader close failure")
+	previous := closeIndex
+	closeIndex = func(db *index.DB) error { return errors.Join(db.Close(), closeErr) }
+	t.Cleanup(func() { closeIndex = previous })
+	var stdout, stderr bytes.Buffer
+	err := runSearch([]string{"OR", "--raw"}, cfg, &stdout, &stderr)
+	if !errors.Is(err, index.ErrBadQuery) || !errors.Is(err, closeErr) {
+		t.Fatalf("query/close errors were not both preserved: %v", err)
 	}
 }
 

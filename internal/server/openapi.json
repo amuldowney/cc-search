@@ -3,7 +3,7 @@
   "info": {
     "title": "cc-search Agent API",
     "version": "1.0.0",
-    "description": "Local transcript search for Claude Code and pi agents. The service binds to loopback and synchronizes its derived index before data operations."
+    "description": "Local transcript search for Claude Code, pi and Codex. Loopback-only reads use WAL snapshots with opportunistic background refresh; refresh=true or POST /v1/refresh waits for transcript synchronization."
   },
   "servers": [
     {
@@ -88,6 +88,9 @@
           },
           {
             "$ref": "#/components/parameters/Budget"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -134,6 +137,9 @@
           },
           {
             "$ref": "#/components/parameters/Budget"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -177,6 +183,9 @@
           },
           {
             "$ref": "#/components/parameters/Budget"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -256,6 +265,9 @@
           },
           {
             "$ref": "#/components/parameters/Any"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -300,6 +312,9 @@
           },
           {
             "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -328,6 +343,9 @@
           },
           {
             "$ref": "#/components/parameters/Full"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -401,6 +419,9 @@
           },
           {
             "$ref": "#/components/parameters/Budget"
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -456,6 +477,9 @@
               "type": "boolean",
               "default": false
             }
+          },
+          {
+            "$ref": "#/components/parameters/Refresh"
           }
         ],
         "responses": {
@@ -489,7 +513,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Refresh"
+          }
+        ]
       }
     },
     "/v1/doctor": {
@@ -505,6 +534,32 @@
                 }
               }
             }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Refresh"
+          }
+        ]
+      }
+    },
+    "/v1/refresh": {
+      "post": {
+        "operationId": "refreshIndex",
+        "description": "Synchronously index changed transcripts. Writers serialize; existing snapshot reads remain available.",
+        "responses": {
+          "200": {
+            "description": "Refresh statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
           }
         }
       }
@@ -661,6 +716,15 @@
       "IncludeCurrent": {
         "name": "include_current",
         "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "Refresh": {
+        "name": "refresh",
+        "in": "query",
+        "description": "Wait for transcript synchronization before reading; normal reads use a snapshot and request background refresh when stale (30-second attempt interval, not a freshness guarantee).",
         "schema": {
           "type": "boolean",
           "default": false
@@ -1221,6 +1285,9 @@
           },
           "lockHealthy": {
             "type": "boolean"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/Freshness"
           }
         }
       },
@@ -1266,6 +1333,33 @@
             }
           }
         ]
+      },
+      "Freshness": {
+        "type": "object",
+        "required": [
+          "lastSuccess",
+          "lastAttempt",
+          "stale"
+        ],
+        "properties": {
+          "lastSuccess": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last completed successful refresh, Unix milliseconds."
+          },
+          "lastAttempt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last refresh attempt, Unix milliseconds."
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string",
+            "description": "Sanitized refresh failure category (no transcript content)."
+          }
+        }
       }
     }
   }

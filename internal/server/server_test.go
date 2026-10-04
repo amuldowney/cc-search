@@ -80,7 +80,7 @@ func TestHandlerServesSearchAndOpenAPI(t *testing.T) {
 	}
 }
 
-func TestWithDBWaitsForLifecycleLock(t *testing.T) {
+func TestSnapshotReadDoesNotWaitForLifecycleLock(t *testing.T) {
 	root := t.TempDir()
 	indexPath := filepath.Join(root, "index.db")
 	api, err := New(Config{IndexPath: indexPath})
@@ -123,20 +123,13 @@ func TestWithDBWaitsForLifecycleLock(t *testing.T) {
 
 	select {
 	case err := <-requestDone:
-		t.Fatalf("request completed while lifecycle lock was held: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	if err := held.ReleaseLifecycleLock(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-requestDone:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("request did not complete after lifecycle lock was released")
+	case <-time.After(time.Second):
+		_ = held.ReleaseLifecycleLock()
+		<-requestDone
+		t.Fatal("snapshot request waited on the writer lifecycle lock")
 	}
 }
 

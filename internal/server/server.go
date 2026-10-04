@@ -28,41 +28,34 @@ type Config struct {
 	TranscriptDirs []string
 }
 
-// Server owns an index and serves requests against it. Operations are
-// serialized so a request cannot query while a transcript replacement or
-// rebuild is in progress.
+// Server serves independent read-only snapshots. Only refresh/rebuild writers
+// serialize; readers never wait for filesystem indexing work.
 type Server struct {
-	db             *index.DB
+	indexPath      string
 	transcriptDirs []string
 	mu             sync.Mutex
+	refreshing     bool
+	closed         bool
+	operations     sync.WaitGroup
 	closeOnce      sync.Once
-	closeErr       error
 }
 
 //go:embed openapi.json
 var openAPIDocument []byte
 
-// New opens the index and performs an initial synchronization.
+// New bootstraps a missing index/root profile, otherwise reuses its snapshot.
 func New(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.IndexPath) == "" {
 		return nil, errors.New("index path is required")
 	}
-	db, err := index.Open(cfg.IndexPath)
+	db, err := index.OpenSnapshot(cfg.IndexPath, cfg.TranscriptDirs, false)
 	if err != nil {
 		return nil, err
 	}
-	fail := func(err error) (*Server, error) {
-		return nil, errors.Join(err, db.Close())
+	if err := db.Close(); err != nil {
+		return nil, err
 	}
-	for _, dir := range cfg.TranscriptDirs {
-		if _, err := db.Sync(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fail(err)
-		}
-	}
-	if err := db.ReleaseLifecycleLock(); err != nil {
-		return fail(err)
-	}
-	return &Server{db: db, transcriptDirs: append([]string(nil), cfg.TranscriptDirs...)}, nil
+	return &Server{indexPath: cfg.IndexPath, transcriptDirs: append([]string(nil), cfg.TranscriptDirs...)}, nil
 }
 
 // Close closes the index. It is safe to call more than once.
@@ -70,8 +63,13 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() { s.closeErr = s.db.Close() })
-	return s.closeErr
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+		s.operations.Wait()
+	})
+	return nil
 }
 
 // Handler returns the HTTP handler for the API.
@@ -90,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/info", s.handleInfo)
 	mux.HandleFunc("/v1/doctor", s.handleDoctor)
 	mux.HandleFunc("/v1/rebuild", s.handleRebuild)
+	mux.HandleFunc("/v1/refresh", s.handleRefresh)
 	return mux
 }
 
@@ -161,7 +160,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.withDB(func(db *index.DB) error {
+	if err := s.withDB(r, func(db *index.DB) error {
 		queryLimit := limit
 		if queryLimit > 0 {
 			queryLimit++
@@ -172,6 +171,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		search := index.SearchOptions{
 			Query:            pattern,
+			PreviewLength:    options.indexPreviewLength(),
 			Limit:            queryLimit,
 			WindowMessages:   windowMessages,
 			WindowHours:      windowHours,
@@ -236,13 +236,14 @@ func (s *Server) handleLast(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	if err := s.withDB(func(db *index.DB) error {
+	if err := s.withDB(r, func(db *index.DB) error {
 		msgs, err := db.Last(index.LastOptions{
-			N:         count,
-			Hours:     hours,
-			SessionID: q.Get("session"),
-			Type:      q.Get("type"),
-			ProseOnly: !options.All,
+			N:             count,
+			Hours:         hours,
+			SessionID:     q.Get("session"),
+			Type:          q.Get("type"),
+			ProseOnly:     !options.All,
+			PreviewLength: options.indexPreviewLength(),
 		})
 		if err != nil {
 			return err
@@ -280,7 +281,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	if err := s.withDB(func(db *index.DB) error {
+	if err := s.withDB(r, func(db *index.DB) error {
 		msgs, err := db.Around(id, before, after, !options.All)
 		if err != nil {
 			status := http.StatusInternalServerError
@@ -316,7 +317,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []index.SessionSummary
-	err = s.withDB(func(db *index.DB) error {
+	err = s.withDB(r, func(db *index.DB) error {
 		rows, err = db.Sessions(index.SessionOptions{Query: strings.TrimSpace(q.Get("pattern")), Limit: limit, CWD: q.Get("cwd"), Any: any})
 		return err
 	})
@@ -325,7 +326,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(rows) == 0 && q.Get("pattern") != "" && !any && index.TermCount(q.Get("pattern")) > 1 {
-		err = s.withDB(func(db *index.DB) error {
+		err = s.withDB(r, func(db *index.DB) error {
 			rows, err = db.Sessions(index.SessionOptions{Query: q.Get("pattern"), Limit: limit, CWD: q.Get("cwd"), Any: true})
 			return err
 		})
@@ -355,7 +356,7 @@ func (s *Server) handleActivities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []index.ActivityRecord
-	err = s.withDB(func(db *index.DB) error {
+	err = s.withDB(r, func(db *index.DB) error {
 		rows, err = db.Activities(index.ActivityOptions{SessionID: q.Get("session"), Status: q.Get("status"), Limit: limit})
 		return err
 	})
@@ -387,7 +388,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var row index.ActivityRecord
-	err := s.withDB(func(db *index.DB) error { var e error; row, e = db.Activity(id); return e })
+	err := s.withDB(r, func(db *index.DB) error { var e error; row, e = db.Activity(id); return e })
 	if err != nil {
 		status, code := http.StatusInternalServerError, "internal_error"
 		if errors.Is(err, index.ErrNoSuchActivity) {
@@ -458,8 +459,9 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var selected []transcript.Message
-	relaxed := false
-	err = s.withDB(func(db *index.DB) error {
+	var expanded []index.ContextMessage
+	relaxed, truncated := false, false
+	err = s.withDB(r, func(db *index.DB) error {
 		limit := hits
 		if limit > 0 {
 			limit++
@@ -469,7 +471,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 			exclude = currentSessionID()
 		}
 		search := index.SearchOptions{Query: pattern, Limit: limit, SessionID: q.Get("session"), ExcludeSessionID: exclude,
-			Type: q.Get("type"), ProseOnly: !options.All, Any: any, Raw: raw}
+			Type: q.Get("type"), ProseOnly: !options.All, Any: any, Raw: raw, PreviewLength: options.indexPreviewLength()}
 		var e error
 		selected, e = db.Search(search)
 		if e != nil {
@@ -482,6 +484,15 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 				relaxed = len(selected) > 0
 			}
 		}
+		if e != nil {
+			return e
+		}
+		truncated = hits > 0 && len(selected) > hits
+		if truncated {
+			selected = selected[:hits]
+		}
+		// Selection and expansion must share a pinned reader snapshot.
+		expanded, e = db.ExpandContext(selected, before, after, !options.All)
 		return e
 	})
 	if err != nil {
@@ -490,20 +501,6 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeDBError(w, err)
 		}
-		return
-	}
-	truncated := hits > 0 && len(selected) > hits
-	if truncated {
-		selected = selected[:hits]
-	}
-	var expanded []index.ContextMessage
-	err = s.withDB(func(db *index.DB) error {
-		var e error
-		expanded, e = db.ExpandContext(selected, before, after, !options.All)
-		return e
-	})
-	if err != nil {
-		writeDBError(w, err)
 		return
 	}
 	contextMessages := make([]transcript.Message, 0, len(expanded))
@@ -554,7 +551,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	if queryLimit > 0 {
 		queryLimit++
 	}
-	err = s.withDB(func(db *index.DB) error {
+	err = s.withDB(r, func(db *index.DB) error {
 		var e error
 		rows, e = db.Commands(index.CommandOptions{Query: pattern, Tool: q.Get("tool"), SessionID: q.Get("session"), Limit: queryLimit, IncludeOutput: full || includeOutput})
 		return e
@@ -580,7 +577,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var info output.InfoResponse
-	if err := s.withDB(func(db *index.DB) error { var e error; info, e = makeInfo(db, false); return e }); err != nil {
+	if err := s.withDB(r, func(db *index.DB) error { var e error; info, e = makeInfo(db, false, s.transcriptDirs); return e }); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -593,11 +590,11 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var info output.InfoResponse
-	if err := s.withDB(func(db *index.DB) error { var e error; info, e = makeInfo(db, true); return e }); err != nil {
+	if err := s.withDB(r, func(db *index.DB) error { var e error; info, e = makeInfo(db, true, s.transcriptDirs); return e }); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	checks := []output.DoctorCheck{{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath}, {Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)}, {Name: "lock", OK: info.LockHealthy, Detail: "lifecycle lock acquired"}}
+	checks := []output.DoctorCheck{{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath}, {Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)}, {Name: "lock", OK: info.LockHealthy, Detail: "snapshot opened without acquiring writer lock"}}
 	ok := true
 	for _, check := range checks {
 		ok = ok && check.OK
@@ -612,7 +609,7 @@ func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 	session := r.URL.Query().Get("session")
 	var stats index.SyncStats
-	if err := s.withDB(func(db *index.DB) error {
+	if err := s.withWriter(func(db *index.DB) error {
 		for _, dir := range s.transcriptDirs {
 			current, err := db.Rebuild(dir, session)
 			if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -674,7 +671,7 @@ func compactPreview(content string) string {
 	return flat
 }
 
-func makeInfo(db *index.DB, verify bool) (output.InfoResponse, error) {
+func makeInfo(db *index.DB, verify bool, roots []string) (output.InfoResponse, error) {
 	stats, err := db.Info()
 	if err != nil {
 		return output.InfoResponse{}, err
@@ -697,6 +694,11 @@ func makeInfo(db *index.DB, verify bool) (output.InfoResponse, error) {
 	for _, source := range stats.Sources {
 		info.Sources = append(info.Sources, output.Source{Path: source.Path, MessageCount: source.MessageCount, SessionCount: source.SessionCount})
 	}
+	status, err := db.Freshness(roots)
+	if err != nil {
+		return info, err
+	}
+	info.Freshness = &output.Freshness{LastSuccess: status.LastSuccess, LastAttempt: status.LastAttempt, Stale: status.Stale, Error: status.Error}
 	return info, nil
 }
 
@@ -704,6 +706,16 @@ func makeInfo(db *index.DB, verify bool) (output.InfoResponse, error) {
 type outputOptions struct {
 	Options output.Options
 	All     bool
+}
+
+func (o outputOptions) indexPreviewLength() int {
+	if o.Options.Full {
+		return 0
+	}
+	if o.Options.PreviewLength <= 0 {
+		return output.DefaultPreviewLength
+	}
+	return o.Options.PreviewLength
 }
 
 func renderOptions(q url.Values) (outputOptions, error) {
@@ -732,20 +744,6 @@ func renderOptions(q url.Values) (outputOptions, error) {
 			Budget:        budget,
 		},
 	}, nil
-}
-
-func (s *Server) withDB(fn func(*index.DB) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.db.WithLifecycleLock(func() error {
-		// Keep request sync and the operation under one process-boundary lock.
-		for _, dir := range s.transcriptDirs {
-			if _, err := s.db.Sync(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		}
-		return fn(s.db)
-	})
 }
 
 func nonNegativeInt(q url.Values, name string, defaultValue int) (int, error) {

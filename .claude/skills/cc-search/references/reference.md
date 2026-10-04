@@ -13,6 +13,7 @@ cc-search context PATTERN         search hits plus expanded context
 cc-search commands PATTERN        retrieve exact historical tool calls
 cc-search info                    index and installation details
 cc-search doctor                  index health checks
+cc-search refresh                 wait for changed transcripts to be indexed
 cc-search rebuild                 discard and rebuild derived data
 cc-search serve                   loopback OpenAPI HTTP API
 ```
@@ -29,7 +30,8 @@ These are available on commands that open the index:
 | Flag | Effect |
 |---|---|
 | `--index PATH` | derived index database (default `~/.claude/search-index.db`) |
-| `--transcripts DIR` | replace both default transcript roots with one root |
+| `--transcripts DIR` | replace all default transcript roots with one root |
+| `--refresh` | wait for latest transcripts before a read (otherwise snapshot-first) |
 | `--session ID` | restrict to a session where the command supports it |
 | `--all` | search/render full content, including tool calls and output |
 | `--full` | emit full content or full activity/command details |
@@ -214,20 +216,29 @@ rollouts are both supported. `CODEX_HOME` defaults to `~/.codex`.
 Codex rollout metadata is skipped; canonical response items and tool records
 are normalized, and duplicate event mirrors are suppressed.
 
-Every operation compares transcript mtime and size with the `files` table and
-re-reads only changed files. A changed transcript is deleted and reinserted,
-so incremental sync does not duplicate messages. `rebuild` is useful when you
-want to force this process or rebuild one session:
+Normal reads open a read-only WAL snapshot and do not wait for writer locks.
+If stale, they request a background refresh, with attempts throttled to once per
+30 seconds. This is not a freshness guarantee: after idle time the first response
+can be older while indexing runs. A busy writer causes background work to skip,
+not queue. `--refresh` or `cc-search refresh` explicitly waits; the API equivalents
+are `refresh=true` on reads and `POST /v1/refresh`. Bootstrap and a previously
+unindexed transcript-root profile also wait automatically.
+
+Refresh compares transcript mtime and size with the `files` table and re-reads
+only changed files. A changed transcript and its summaries/previews/tool links
+are replaced transactionally. `rebuild` forces this process for all or one session:
 
 ```bash
 cc-search rebuild
 cc-search rebuild --session SESSION_ID
 ```
 
-`cc-search info` reports indexed source and count information. `cc-search
-doctor` performs the SQLite integrity and schema checks. Lifecycle operations
-use a path-specific advisory lock, so concurrent CLI processes are safe on Unix
-systems. The unsupported-platform fallback does not claim a lifecycle lock.
+`cc-search info` reports counts and `freshness` (lastSuccess/lastAttempt in Unix
+milliseconds, stale, optional sanitized error); add `--sources` for source files.
+Failed refreshes retain the last successful snapshot. `cc-search doctor` performs the SQLite integrity/schema checks on the snapshot;
+add `--refresh` to synchronize first. Writers use a
+path-specific advisory lock; read-only snapshots do not acquire it. The
+unsupported-platform fallback does not claim a lifecycle lock.
 
 ## Troubleshooting
 
@@ -237,7 +248,8 @@ systems. The unsupported-platform fallback does not claim a lifecycle lock.
 | No matches for a command or error | Add `--all`; it may only be in tool output. |
 | `relaxed: true` | The exact AND query had no match; narrow or improve the query. |
 | Missing one agent's sessions | Run `cc-search info`; check both default roots or pass `--transcripts`. |
-| Stale or unhealthy index | Run `cc-search doctor`, then `cc-search rebuild`. |
+| Missing recent conversation | Retry with `--refresh` or run `cc-search refresh`. |
+| Unhealthy index | Run `cc-search doctor`, then `cc-search rebuild`. |
 | Concurrent access failure | Wait for the other process; the lock timeout names the index. |
 
 ## Build

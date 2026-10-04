@@ -106,7 +106,16 @@ cc-search read 36b182bb --before 3 --after 3
 3. Search a shorter or alternate word form.
 4. Limit the time or corpus with `--window-hours`, `--window-messages`, or
    `--session`.
-5. Run `cc-search info` to verify which roots and files are indexed.
+5. If the conversation is very recent, retry with `--refresh`: normal reads
+   use a snapshot and trigger background refresh at most once per 30 seconds.
+   After idle periods, the first response can be older while refresh runs.
+6. Run `cc-search info` for counts/freshness; `info --sources` lists source files.
+
+Use `cc-search refresh` to wait for all configured roots. First indexing/schema
+upgrades wait automatically. `info.freshness` reports last successful refresh,
+last attempt, staleness and a sanitized error; a failed background refresh does
+not invalidate the existing snapshot. The API supports `refresh=true` on reads
+and `POST /v1/refresh`.
 
 Default sources are `~/.claude/projects`, `~/.pi/agent/sessions`,
 `$CODEX_HOME/sessions`, and `$CODEX_HOME/archived_sessions`; they are walked
