@@ -9,12 +9,32 @@ import (
 
 const lifecycleLockTimeout = 30 * time.Second
 
+var errLifecycleLockBusy = errors.New("lifecycle lock is busy")
+
 type lifecycleLock struct {
 	file *os.File
 }
 
 func acquireLifecycleLock(indexPath string) (*lifecycleLock, error) {
 	return acquireLifecycleLockWithTimeout(indexPath, lifecycleLockTimeout)
+}
+
+func acquireLifecycleLockNonblocking(indexPath string) (*lifecycleLock, error) {
+	if err := lifecycleLockSupportError(); err != nil {
+		return nil, fmt.Errorf("acquire lifecycle lock for index %q: %w", indexPath, err)
+	}
+	file, err := os.OpenFile(indexPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lifecycle lock for index %q: %w", indexPath, err)
+	}
+	if err := tryLifecycleLock(file); err != nil {
+		_ = file.Close()
+		if isLifecycleLockBusy(err) {
+			return nil, fmt.Errorf("acquire lifecycle lock for index %q: %w", indexPath, errLifecycleLockBusy)
+		}
+		return nil, fmt.Errorf("acquire lifecycle lock for index %q: %w", indexPath, err)
+	}
+	return &lifecycleLock{file: file}, nil
 }
 
 func acquireLifecycleLockWithTimeout(indexPath string, timeout time.Duration) (*lifecycleLock, error) {

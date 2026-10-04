@@ -137,9 +137,10 @@ CREATE TABLE IF NOT EXISTS files (
 
 // DB is an open index database.
 type DB struct {
-	sql       *sql.DB
-	lifecycle *lifecycleLock
-	path      string
+	sql            *sql.DB
+	lifecycle      *lifecycleLock
+	path           string
+	readerSnapshot bool
 }
 
 // SyncStats reports what a Sync changed.
@@ -346,7 +347,12 @@ func (d *DB) Close() error {
 	if d == nil {
 		return nil
 	}
-	return errors.Join(d.sql.Close(), d.ReleaseLifecycleLock())
+	var rollbackErr error
+	if d.readerSnapshot {
+		_, rollbackErr = d.sql.Exec(`ROLLBACK`)
+		d.readerSnapshot = false
+	}
+	return errors.Join(rollbackErr, d.sql.Close(), d.ReleaseLifecycleLock())
 }
 
 // Sync indexes any transcript file in dir that changed since the last sync.
