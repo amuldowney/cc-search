@@ -88,6 +88,35 @@ func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
 	}
 }
 
+func TestInfoSummarySkipsSourcesAndInfoRetainsThem(t *testing.T) {
+	db, dir := newIndex(t, []msg{{"user", "diagnostic fixture", 10}})
+
+	summary, err := db.InfoSummary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.FileCount != 1 || summary.MessageCount != 1 || len(summary.Sources) != 0 {
+		t.Fatalf("summary = %+v, want counts and no per-file sources", summary)
+	}
+
+	sources, err := db.InfoSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(dir, "session-a.jsonl")
+	if len(sources) != 1 || sources[0].Path != wantPath || sources[0].MessageCount != 1 {
+		t.Fatalf("sources = %+v, want one source %q with one message", sources, wantPath)
+	}
+
+	full, err := db.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Sources) != 1 || full.Sources[0].Path != wantPath {
+		t.Fatalf("Info() sources = %+v, want source details retained", full.Sources)
+	}
+}
+
 func TestSyncIndexesMessagesFromTranscripts(t *testing.T) {
 	db, _ := newIndex(t, []msg{
 		{"user", "build the search index", 10},

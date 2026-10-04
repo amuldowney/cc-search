@@ -1483,7 +1483,7 @@ func (d *DB) ExpandContext(hits []transcript.Message, before, after int, proseOn
 	return out, nil
 }
 
-// IndexInfo reports derived-index counts and the transcript files it contains.
+// IndexInfo reports derived-index counts and, when requested, transcript files.
 type IndexInfo struct {
 	IndexPath     string
 	SchemaVersion int
@@ -1503,6 +1503,16 @@ type SourceInfo struct {
 
 // Info returns counts and source paths from the index.
 func (d *DB) Info() (IndexInfo, error) {
+	info, err := d.InfoSummary()
+	if err != nil {
+		return info, err
+	}
+	info.Sources, err = d.InfoSources()
+	return info, err
+}
+
+// InfoSummary returns index counts without grouping every message by source.
+func (d *DB) InfoSummary() (IndexInfo, error) {
 	info := IndexInfo{IndexPath: d.path}
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&info.SchemaVersion); err != nil {
 		return info, err
@@ -1519,28 +1529,34 @@ func (d *DB) Info() (IndexInfo, error) {
 	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&info.FileCount); err != nil {
 		return info, err
 	}
+	// Opening the database and completing the count queries above provide a
+	// cheap operational check. The full integrity scan belongs to `doctor`.
+	info.IndexHealthy = true
+	return info, nil
+}
+
+// InfoSources returns per-file counts for callers that need source details.
+func (d *DB) InfoSources() ([]SourceInfo, error) {
 	rows, err := d.sql.Query(`SELECT f.path, COUNT(m.id),
 			(SELECT COUNT(*) FROM sessions s WHERE s.sourcePath = f.path)
 		FROM files f LEFT JOIN messages m ON m.sourcePath = f.path
 		GROUP BY f.path ORDER BY f.path`)
 	if err != nil {
-		return info, err
+		return nil, err
 	}
 	defer rows.Close()
+	var sources []SourceInfo
 	for rows.Next() {
 		var source SourceInfo
 		if err := rows.Scan(&source.Path, &source.MessageCount, &source.SessionCount); err != nil {
-			return info, err
+			return nil, err
 		}
-		info.Sources = append(info.Sources, source)
+		sources = append(sources, source)
 	}
 	if err := rows.Err(); err != nil {
-		return info, err
+		return nil, err
 	}
-	// Opening the database and completing the count queries above provide a
-	// cheap operational check. The full integrity scan belongs to `doctor`.
-	info.IndexHealthy = true
-	return info, nil
+	return sources, nil
 }
 
 // Check runs SQLite's lightweight integrity check.

@@ -57,6 +57,49 @@ func run(t *testing.T, cfg Config, args ...string) (output.Response, string, int
 	return resp, stderr.String(), code
 }
 
+func TestInfoSourcesAreOptIn(t *testing.T) {
+	cfg := fixture(t, []msg{{typ: "user", content: "diagnostic fixture"}})
+	transcriptPath := filepath.Join(cfg.TranscriptDirs[0], "session-a.jsonl")
+
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		wantSources bool
+	}{
+		{name: "summary", args: []string{"info"}},
+		{name: "detailed", args: []string{"info", "--sources"}, wantSources: true},
+		{name: "doctor", args: []string{"doctor"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Run(tc.args, cfg, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+			}
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			sourcesJSON, hasSources := response["sources"]
+			if hasSources != tc.wantSources {
+				t.Fatalf("sources present = %v, want %v; output = %s", hasSources, tc.wantSources, stdout.String())
+			}
+			if !tc.wantSources {
+				if len(stdout.Bytes()) > 1024 {
+					t.Errorf("summary output = %d bytes, want at most 1024", stdout.Len())
+				}
+				return
+			}
+			var sources []output.Source
+			if err := json.Unmarshal(sourcesJSON, &sources); err != nil {
+				t.Fatalf("decode sources: %v", err)
+			}
+			if len(sources) != 1 || sources[0].Path != transcriptPath {
+				t.Fatalf("sources = %+v, want the indexed transcript %q", sources, transcriptPath)
+			}
+		})
+	}
+}
+
 func TestConfigDefaultsIncludeCodexRootsAndRespectCodexHome(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	t.Setenv("CODEX_HOME", codexHome)

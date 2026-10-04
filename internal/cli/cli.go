@@ -65,7 +65,7 @@ commands:
   activity ID [--full]                  inspect one subagent activity
   context PATTERN [options]             search hits with surrounding context
   commands PATTERN [options]            retrieve exact historical tool calls
-  info                                  show index and installation details
+  info [--sources]                     show index and installation details
   doctor                                check index and installation health
   rebuild [--session ID]                discard and rebuild the index
   serve [--host 127.0.0.1] [--port N]  serve the local OpenAPI HTTP API
@@ -686,6 +686,7 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 
 func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("info", stderr)
+	sources := f.set.Bool("sources", false, "include per-file source counts")
 	if err := f.set.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
@@ -693,7 +694,7 @@ func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
 	}
 	cfg = f.resolve(cfg)
-	info, err := diagnosticInfo(cfg, stderr, false)
+	info, err := diagnosticInfo(cfg, stderr, false, *sources)
 	if err != nil {
 		return err
 	}
@@ -709,7 +710,7 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
 	}
 	cfg = f.resolve(cfg)
-	info, err := diagnosticInfo(cfg, stderr, true)
+	info, err := diagnosticInfo(cfg, stderr, true, false)
 	if err != nil {
 		return err
 	}
@@ -731,15 +732,22 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	return nil
 }
 
-func diagnosticInfo(cfg Config, stderr io.Writer, verify bool) (info output.InfoResponse, err error) {
+func diagnosticInfo(cfg Config, stderr io.Writer, verify, includeSources bool) (info output.InfoResponse, err error) {
 	db, err := openIndexMode(cfg, stderr, verify)
 	if err != nil {
 		return info, err
 	}
 	defer func() { err = errors.Join(err, closeIndex(db)) }()
-	stats, err := db.Info()
+	stats, err := db.InfoSummary()
 	if err != nil {
 		return info, err
+	}
+	var sources []index.SourceInfo
+	if includeSources {
+		sources, err = db.InfoSources()
+		if err != nil {
+			return info, err
+		}
 	}
 	if verify {
 		stats.IndexHealthy = db.Check() == nil
@@ -754,10 +762,10 @@ func diagnosticInfo(cfg Config, stderr io.Writer, verify bool) (info output.Info
 	}
 	info = output.InfoResponse{IndexPath: stats.IndexPath, SchemaVersion: stats.SchemaVersion,
 		MessageCount: stats.MessageCount, SessionCount: stats.SessionCount, ActivityCount: stats.ActivityCount,
-		FileCount: stats.FileCount, Sources: make([]output.Source, 0, len(stats.Sources)),
+		FileCount: stats.FileCount, Sources: make([]output.Source, 0, len(sources)),
 		BinaryPath: binaryPath, BinaryVersion: binaryVersion, CurrentSession: currentSessionID(),
 		IndexHealthy: stats.IndexHealthy, LockHealthy: true}
-	for _, source := range stats.Sources {
+	for _, source := range sources {
 		info.Sources = append(info.Sources, output.Source{Path: source.Path, MessageCount: source.MessageCount, SessionCount: source.SessionCount})
 	}
 	return info, nil

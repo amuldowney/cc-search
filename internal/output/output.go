@@ -124,7 +124,7 @@ type InfoResponse struct {
 	SessionCount   int      `json:"sessionCount"`
 	ActivityCount  int      `json:"activityCount"`
 	FileCount      int      `json:"fileCount"`
-	Sources        []Source `json:"sources"`
+	Sources        []Source `json:"sources,omitempty"`
 	BinaryPath     string   `json:"binaryPath"`
 	BinaryVersion  string   `json:"binaryVersion"`
 	CurrentSession string   `json:"currentSession"`
