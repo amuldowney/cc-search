@@ -125,12 +125,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	windowMessages, err := nonNegativeInt(q, "window_messages", 0)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
-		return
-	}
-	windowHours, err := nonNegativeInt(q, "window_hours", 0)
+	retrieval, err := parseRetrieval(q)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
@@ -170,11 +165,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			excludeSession = currentSessionID()
 		}
 		search := index.SearchOptions{
-			Query:            pattern,
-			PreviewLength:    options.indexPreviewLength(),
-			Limit:            queryLimit,
-			WindowMessages:   windowMessages,
-			WindowHours:      windowHours,
+			Query:          pattern,
+			PreviewLength:  options.indexPreviewLength(),
+			Limit:          queryLimit,
+			WindowMessages: retrieval.windowMessages,
+			WindowHours:    retrieval.hours,
+			CWD:            q.Get("cwd"), PerSession: retrieval.perSession, ReduceNoise: retrieval.reduceNoise,
 			SessionID:        q.Get("session"),
 			ExcludeSessionID: excludeSession,
 			Type:             q.Get("type"),
@@ -218,17 +214,17 @@ func (s *Server) handleLast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	count, err := nonNegativeInt(q, "count", 0)
+	count, err := aliasedInt(q, "count", "limit", 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	hours, err := nonNegativeInt(q, "hours", 0)
+	hours, err := aliasedInt(q, "hours", "window_hours", 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	if q.Get("hours") == "" && q.Get("count") == "" {
+	if q.Get("hours") == "" && q.Get("window_hours") == "" && q.Get("count") == "" && q.Get("limit") == "" {
 		count = 10
 	}
 	options, err := renderOptions(q)
@@ -239,6 +235,7 @@ func (s *Server) handleLast(w http.ResponseWriter, r *http.Request) {
 	if err := s.withDB(r, func(db *index.DB) error {
 		msgs, err := db.Last(index.LastOptions{
 			N:             count,
+			CWD:           q.Get("cwd"),
 			Hours:         hours,
 			SessionID:     q.Get("session"),
 			Type:          q.Get("type"),
@@ -434,6 +431,11 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
+	retrieval, err := parseRetrieval(q)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
 	any, err := boolParam(q, "any")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
@@ -471,6 +473,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 			exclude = currentSessionID()
 		}
 		search := index.SearchOptions{Query: pattern, Limit: limit, SessionID: q.Get("session"), ExcludeSessionID: exclude,
+			CWD: q.Get("cwd"), WindowHours: retrieval.hours, WindowMessages: retrieval.windowMessages, PerSession: retrieval.perSession, ReduceNoise: retrieval.reduceNoise,
 			Type: q.Get("type"), ProseOnly: !options.All, Any: any, Raw: raw, PreviewLength: options.indexPreviewLength()}
 		var e error
 		selected, e = db.Search(search)
@@ -546,6 +549,25 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
+	hours, err := aliasedInt(q, "hours", "window_hours", 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	includeCurrent, err := boolParam(q, "include_current")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	match := q.Get("match")
+	if match != "" && match != "both" && match != "arguments" && match != "output" {
+		writeError(w, http.StatusBadRequest, "invalid_input", "match must be arguments, output, or both")
+		return
+	}
+	exclude := ""
+	if q.Get("session") == "" && !includeCurrent {
+		exclude = currentSessionID()
+	}
 	var rows []index.CommandRecord
 	queryLimit := limit
 	if queryLimit > 0 {
@@ -553,7 +575,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	}
 	err = s.withDB(r, func(db *index.DB) error {
 		var e error
-		rows, e = db.Commands(index.CommandOptions{Query: pattern, Tool: q.Get("tool"), SessionID: q.Get("session"), Limit: queryLimit, IncludeOutput: full || includeOutput})
+		rows, e = db.Commands(index.CommandOptions{Query: pattern, Tool: q.Get("tool"), Match: match, Hours: hours, CWD: q.Get("cwd"), ExcludeSessionID: exclude, SessionID: q.Get("session"), Limit: queryLimit, IncludeOutput: full || includeOutput})
 		return e
 	})
 	if err != nil {

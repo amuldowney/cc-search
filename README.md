@@ -21,7 +21,7 @@ git clone https://github.com/amuldowney/cc-search.git
 cd cc-search
 make deploy
 cc-search doctor
-cc-search search "the topic you need" --limit 5
+cc-search search "the topic you need" --limit 5 --format text
 ```
 
 `make deploy` runs the Go tests and vet, builds with the required `sqlite_fts5`
@@ -40,7 +40,9 @@ a binary that cannot search.
 
 ## Agent quick reference
 
-Query, browsing, and diagnostic commands emit one JSON line on stdout.
+Query, browsing, and diagnostic commands default to one JSON line on stdout.
+Use `--format text` for readable blocks with full copyable IDs and explicit
+relaxed/truncated/budget notices; JSON remains the programmatic default.
 Warnings and errors go to stderr, so piping those commands to `jq` is safe.
 `rebuild` and `serve` print human-readable status text. Exit codes are 0 for
 success (including no matches), 1 for runtime errors, and 2 for invalid
@@ -53,10 +55,10 @@ cc-search last --hours 4 --type user
 
 # Find a decision, then read the surrounding exchange.
 cc-search search "authentication redirect" --limit 5 --preview-length 180
-cc-search read MESSAGE_ID_PREFIX --before 5 --after 8
+cc-search read FULL_MESSAGE_ID --before 3 --after 5 --full --budget 16000 --format text
 
 # Search commands and tool output when the exact string is not prose.
-cc-search commands "docker compose" --tool Bash --full
+cc-search commands "docker compose" --tool Bash --match arguments --format text
 cc-search search "no such module: fts5" --all --full
 
 # Get a relevance-selected context bundle.
@@ -78,7 +80,9 @@ cc-search rebuild
 ```
 
 Search patterns are positional and must come before flags. A unique prefix of a
-message or activity ID is accepted by `read` and `activity`.
+message or activity ID is accepted by `read` and `activity`, but prefer full
+IDs. Pi message IDs start with the session UUID, so an eight-character prefix
+is normally ambiguous.
 
 ## What is indexed
 
@@ -125,9 +129,28 @@ cc-search search '"caddy" OR "pihole" NOT "proxy"' --raw
 
 Raw queries are never relaxed and punctuation must be quoted for FTS5.
 
-When run inside pi, search excludes the current pi session by default because
+When run inside pi, search, context and commands exclude the current pi session by default because
 it is already in the caller's context. `--include-current` restores it, and an
 explicit `--session ID` always selects that session.
+
+## Retrieval controls
+
+- `--cwd PATH`: exact recorded working directory on search, context, last,
+  commands and sessions. Worktrees/workspace roots can have different cwd.
+- `--per-session N`: opt-in cap for search/context, applied before the total
+  limit, so one long session cannot crowd out others (`0` = no cap).
+- `--reduce-noise`: opt-in demotion of likely copied skill documents and
+  echoed search-result JSON. It never removes matches and is not a trust filter.
+- `--hours H`: alias for `--window-hours` on search/context; also works on last
+  and commands. `last --limit N` aliases positional N; explicit zero is unlimited.
+  Conflicting aliases and negative counts are rejected before opening the index.
+- `commands --match arguments|output|both`: search one invocation's tool name/
+  arguments and/or its paired output, not unrelated siblings or surrounding
+  prose. `--include-output` only affects display.
+
+Compact search excerpts show FTS-matching passages, including late matches;
+`--full` still returns original text. `read` and `last` retain prefix previews.
+The API exposes equivalent snake_case parameters and stays JSON.
 
 ## Snapshot freshness
 
@@ -174,9 +197,10 @@ The budget shapes output rather than blindly truncating JSON:
 - every response reports `budget.limit`, `budget.spent`, `budget.dropped`, and
   `budget.shrunk`
 
-Session summaries, compact search/recent-message previews (up to 512 characters),
-and tool-call/result links are built at indexing time. Full content and larger
-custom previews remain available. `commands` returns the newest matching calls;
+Session summaries, recent-message preview prefixes, tool-call/result links,
+and per-invocation command search documents are built at indexing time.
+Matching search excerpts are generated only for selected hits; full content
+and larger custom previews remain available. `commands` returns the newest matching calls;
 it no longer drops newer low-relevance matches through an intermediate FTS cap.
 
 `context` first selects relevant hits and then returns a deduplicated,

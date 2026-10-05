@@ -75,7 +75,10 @@ commands:
 search options:
   --limit N             maximum results returned (default 20; 0 = unlimited)
   --window-messages M   only search the newest M messages
-  --window-hours H      only search the last H hours
+  --window-hours H      only search the last H hours (--hours is an alias)
+  --cwd PATH            exact recorded session working directory
+  --per-session N       cap hits per session before total limit (0 = no cap)
+  --reduce-noise        demote copied skills and echoed search JSON
   --session ID          restrict to one session
   --include-current     include the current session in search results
   --type TYPE           restrict to user, assistant, system, ...
@@ -86,7 +89,7 @@ search options:
 read options:
   --before N            messages of context before it (default 5)
   --after N             messages of context after it (default 5)
-  ID may be any unique prefix of a message id, as returned by search.
+  Copy the full ID from search (Pi session prefixes alone are ambiguous).
 
 sessions options:
   --limit N             maximum sessions returned (default 20)
@@ -101,17 +104,28 @@ activities options:
 
 context options:
   --hits N              number of search hits to expand (default 3)
+  Supports search time windows, --cwd, --per-session and --reduce-noise.
   --before N            messages before each hit (default 3)
   --after N             messages after each hit (default 8)
 
 commands options:
+  --match MODE          arguments, output, or both (default); one invocation
+  --cwd PATH            exact recorded session working directory
+  --hours H             only the last H hours
+  --include-current     include the current pi session
   --tool NAME           restrict to one tool (for example Bash)
   --session ID          restrict to one session
   --limit N             maximum commands returned (default 20; 0 = unlimited)
   --full                include paired tool output
   --include-output      include paired tool output (same as --full)
 
-output options (last, search, read and context):
+last options:
+  --limit N             alias for positional N (explicit 0 = unlimited)
+  --cwd PATH            exact recorded session working directory
+
+output options:
+  --format json|text    JSON by default; readable blocks with full IDs in text
+  Message body options (last, search, read and context):
   --all                 include tool calls and their output (default: only
                         what was actually said)
   --preview-length N    preview size in characters (default 100)
@@ -227,6 +241,7 @@ func closeIndexWithError(db *index.DB, operationErr error) error {
 // commonFlags are shared by every command that reads or writes the index.
 type commonFlags struct {
 	set           *flag.FlagSet
+	format        string
 	session       string
 	previewLength int
 	full          bool
@@ -241,6 +256,7 @@ func newFlagSet(name string, stderr io.Writer) *commonFlags {
 	set := flag.NewFlagSet(name, flag.ContinueOnError)
 	set.SetOutput(stderr)
 	f := &commonFlags{set: set}
+	set.StringVar(&f.format, "format", "json", "output format: json or text")
 	set.StringVar(&f.session, "session", "", "restrict to one session")
 	set.IntVar(&f.previewLength, "preview-length", output.DefaultPreviewLength, "preview size in characters")
 	set.BoolVar(&f.full, "full", false, "include the complete message content")
@@ -337,23 +353,38 @@ func openIndexMode(cfg Config, stderr io.Writer, reportMissing bool) (*index.DB,
 
 func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("last", stderr)
-	hours := f.set.Int("hours", 0, "only messages from the last H hours")
+	q := newRetrievalFlags(f, false)
+	limit := f.set.Int("limit", 0, "maximum messages (alias for positional N; 0 = unlimited)")
 	msgType := f.set.String("type", "", "restrict to a message type")
 
 	// A bare count may precede the flags: `cc-search last 10 --session X`.
 	count := 0
+	positionalCount := false
 	if len(args) > 0 {
 		if n, err := strconv.Atoi(args[0]); err == nil {
 			count, args = n, args[1:]
+			positionalCount = true
 		}
 	}
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
 	}
-	if count == 0 && *hours == 0 {
+	if err := q.resolve(f); err != nil {
+		return err
+	}
+	if count < 0 {
+		return fmt.Errorf("%w: N must be non-negative", errUsage)
+	}
+	if positionalCount && f.visited("limit") && count != *limit {
+		return fmt.Errorf("%w: N and --limit disagree", errUsage)
+	}
+	if f.visited("limit") {
+		count = *limit
+	}
+	if !positionalCount && !f.visited("limit") && q.hours == 0 {
 		count = defaultLastCount
 	}
 
@@ -365,18 +396,17 @@ func runLast(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	defer func() { err = errors.Join(err, closeIndex(db)) }()
 
 	msgs, err := db.Last(index.LastOptions{
-		N: count, Hours: *hours, SessionID: f.session, Type: *msgType, ProseOnly: !f.all, PreviewLength: f.indexPreviewLength()})
+		N: count, Hours: q.hours, CWD: q.cwd, SessionID: f.session, Type: *msgType, ProseOnly: !f.all, PreviewLength: f.indexPreviewLength()})
 	if err != nil {
 		return err
 	}
-	return emit(stdout, stderr, msgs, f.outputOptions(false))
+	return f.emit(stdout, stderr, msgs, f.outputOptions(false))
 }
 
 func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("search", stderr)
 	limit := f.set.Int("limit", index.DefaultSearchLimit, "maximum results returned (0 = unlimited)")
-	windowMessages := f.set.Int("window-messages", 0, "only search the newest M messages")
-	windowHours := f.set.Int("window-hours", 0, "only search the last H hours")
+	q := newRetrievalFlags(f, true)
 	msgType := f.set.String("type", "", "restrict to a message type")
 	any := f.set.Bool("any", false, "match any term rather than all of them")
 	raw := f.set.Bool("raw", false, "pass the pattern to FTS5 as a boolean expression")
@@ -390,7 +420,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 			"got %q in the pattern position", errUsage, args[0])
 	}
 	pattern, args := args[0], args[1:]
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -402,6 +432,9 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		return fmt.Errorf("%w: --any has no meaning for a --raw query; write OR yourself", errUsage)
 	}
 
+	if err := q.resolve(f); err != nil {
+		return err
+	}
 	cfg = f.resolve(cfg)
 	db, err := openReadIndex(cfg, stderr)
 	if err != nil {
@@ -421,11 +454,12 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		excludeSession = currentSessionID()
 	}
 	search := index.SearchOptions{
-		Query:            pattern,
-		PreviewLength:    f.indexPreviewLength(),
-		Limit:            queryLimit,
-		WindowMessages:   *windowMessages,
-		WindowHours:      *windowHours,
+		Query:          pattern,
+		PreviewLength:  f.indexPreviewLength(),
+		Limit:          queryLimit,
+		WindowMessages: q.windowMessages,
+		WindowHours:    q.hours,
+		CWD:            q.cwd, PerSession: q.perSession, ReduceNoise: q.reduceNoise,
 		SessionID:        f.session,
 		ExcludeSessionID: excludeSession,
 		Type:             *msgType,
@@ -466,7 +500,7 @@ func runSearch(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 
 	opts := f.outputOptions(truncated)
 	opts.Relaxed = relaxed
-	return emit(stdout, stderr, msgs, opts)
+	return f.emit(stdout, stderr, msgs, opts)
 }
 
 const (
@@ -485,7 +519,7 @@ func runSessions(args []string, cfg Config, stdout, stderr io.Writer) (err error
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		pattern, args = args[0], args[1:]
 	}
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -519,14 +553,14 @@ func runSessions(args []string, cfg Config, stdout, stderr io.Writer) (err error
 			LastPreview: compactPreview(row.LastPreview), MessageCount: row.MessageCount,
 		})
 	}
-	return writeJSONLine(stdout, response)
+	return f.writeResponse(stdout, response)
 }
 
 func runActivities(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("activities", stderr)
 	status := f.set.String("status", "", "activity status")
 	limit := f.set.Int("limit", defaultActivityLimit, "maximum activities returned")
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -549,7 +583,7 @@ func runActivities(args []string, cfg Config, stdout, stderr io.Writer) (err err
 	for _, row := range rows {
 		activities = append(activities, activityOutput(row, f.full))
 	}
-	return writeJSONLine(stdout, output.ActivitiesResponse{Activities: activities, Total: len(activities)})
+	return f.writeResponse(stdout, output.ActivitiesResponse{Activities: activities, Total: len(activities)})
 }
 
 func runActivity(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
@@ -561,7 +595,7 @@ func runActivity(args []string, cfg Config, stdout, stderr io.Writer) (err error
 		return fmt.Errorf("%w: the activity id must come before the flags, got %q", errUsage, args[0])
 	}
 	id, args := args[0], args[1:]
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -577,11 +611,12 @@ func runActivity(args []string, cfg Config, stdout, stderr io.Writer) (err error
 	if err != nil {
 		return err
 	}
-	return writeJSONLine(stdout, activityOutput(row, f.full))
+	return f.writeResponse(stdout, activityOutput(row, f.full))
 }
 
 func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("context", stderr)
+	q := newRetrievalFlags(f, true)
 	hits := f.set.Int("hits", defaultContextHits, "number of search hits to expand")
 	before := f.set.Int("before", 3, "messages before each hit")
 	after := f.set.Int("after", 8, "messages after each hit")
@@ -596,7 +631,7 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 		return fmt.Errorf("%w: the context pattern must come before the flags, got %q", errUsage, args[0])
 	}
 	pattern, args := args[0], args[1:]
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -607,6 +642,9 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 	}
 	if *raw && *any {
 		return fmt.Errorf("%w: --any has no meaning for a --raw query; write OR yourself", errUsage)
+	}
+	if err := q.resolve(f); err != nil {
+		return err
 	}
 	cfg = f.resolve(cfg)
 	db, err := openReadIndex(cfg, stderr)
@@ -624,6 +662,7 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 		excludeSession = currentSessionID()
 	}
 	search := index.SearchOptions{Query: pattern, Limit: queryLimit, SessionID: f.session,
+		CWD: q.cwd, WindowHours: q.hours, WindowMessages: q.windowMessages, PerSession: q.perSession, ReduceNoise: q.reduceNoise,
 		ExcludeSessionID: excludeSession, Type: *msgType,
 		ProseOnly: !f.all, Any: *any, Raw: *raw, PreviewLength: f.indexPreviewLength()}
 	selected, err := db.Search(search)
@@ -676,11 +715,14 @@ func runContext(args []string, cfg Config, stdout, stderr io.Writer) (err error)
 	} else if response.Budget.Shrunk {
 		fmt.Fprintf(stderr, "cc-search: warning: context previews were shortened to fit the %d character budget (%d spent); raise or disable it with --budget\n", response.Budget.Limit, response.Budget.Spent)
 	}
-	return writeJSONLine(stdout, response)
+	return f.writeResponse(stdout, response)
 }
 
 func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("commands", stderr)
+	q := newRetrievalFlags(f, false)
+	match := f.set.String("match", "both", "match arguments, output, or both for each invocation")
+	includeCurrent := f.set.Bool("include-current", false, "include the current session")
 	tool := f.set.String("tool", "", "restrict to one tool")
 	limit := f.set.Int("limit", defaultCommandLimit, "maximum commands returned (0 = unlimited)")
 	includeOutput := f.set.Bool("include-output", false, "include paired tool output")
@@ -692,7 +734,7 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 		return fmt.Errorf("%w: the command pattern must come before the flags, got %q", errUsage, args[0])
 	}
 	pattern, args := args[0], args[1:]
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -700,6 +742,12 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 	}
 	if *limit < 0 {
 		return fmt.Errorf("%w: --limit must be non-negative", errUsage)
+	}
+	if *match != "both" && *match != "arguments" && *match != "output" {
+		return fmt.Errorf("%w: --match must be arguments, output, or both", errUsage)
+	}
+	if err := q.resolve(f); err != nil {
+		return err
 	}
 	cfg = f.resolve(cfg)
 	db, err := openReadIndex(cfg, stderr)
@@ -711,7 +759,11 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 	if queryLimit > 0 {
 		queryLimit++
 	}
-	rows, err := db.Commands(index.CommandOptions{Query: pattern, Tool: *tool, SessionID: f.session, Limit: queryLimit, IncludeOutput: f.full || *includeOutput || *outputFlag})
+	exclude := ""
+	if f.session == "" && !*includeCurrent {
+		exclude = currentSessionID()
+	}
+	rows, err := db.Commands(index.CommandOptions{Query: pattern, Tool: *tool, Match: *match, CWD: q.cwd, Hours: q.hours, ExcludeSessionID: exclude, SessionID: f.session, Limit: queryLimit, IncludeOutput: f.full || *includeOutput || *outputFlag})
 	if err != nil {
 		return err
 	}
@@ -723,13 +775,13 @@ func runCommands(args []string, cfg Config, stdout, stderr io.Writer) (err error
 	for _, row := range rows {
 		commands = append(commands, output.Command{Tool: row.Tool, Arguments: commandArguments(row.Arguments), SessionID: row.SessionID, MessageID: row.MessageID, Timestamp: formatTimestamp(row.Timestamp), Output: row.Output})
 	}
-	return writeJSONLine(stdout, output.CommandsResponse{Commands: commands, Total: len(commands), Truncated: truncated})
+	return f.writeResponse(stdout, output.CommandsResponse{Commands: commands, Total: len(commands), Truncated: truncated})
 }
 
 func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("info", stderr)
 	sources := f.set.Bool("sources", false, "include per-file source counts")
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -740,12 +792,12 @@ func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	return writeJSONLine(stdout, info)
+	return f.writeResponse(stdout, info)
 }
 
 func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("doctor", stderr)
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -765,7 +817,7 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 	for _, check := range checks {
 		ok = ok && check.OK
 	}
-	if err := writeJSONLine(stdout, output.DoctorResponse{InfoResponse: info, OK: ok, Checks: checks}); err != nil {
+	if err := f.writeResponse(stdout, output.DoctorResponse{InfoResponse: info, OK: ok, Checks: checks}); err != nil {
 		return err
 	}
 	if !ok {
@@ -983,12 +1035,8 @@ func currentSessionID() string {
 	return name
 }
 
-func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Options) error {
+func (f *commonFlags) emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Options) error {
 	resp := output.Format(msgs, opts)
-	encoded, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
 	switch b := resp.Budget; {
 	case b.Dropped > 0:
 		fmt.Fprintf(stderr, "cc-search: warning: the %d character budget dropped %d of %d "+
@@ -999,8 +1047,7 @@ func emit(stdout, stderr io.Writer, msgs []transcript.Message, opts output.Optio
 			"character budget (%d spent); raise or disable it with --budget\n",
 			b.Limit, b.Spent)
 	}
-	_, err = fmt.Fprintln(stdout, string(encoded))
-	return err
+	return f.writeResponse(stdout, resp)
 }
 
 func runRead(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
@@ -1016,7 +1063,7 @@ func runRead(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 			errUsage, args[0])
 	}
 	id, args := args[0], args[1:]
-	if err := f.set.Parse(args); err != nil {
+	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
@@ -1034,5 +1081,5 @@ func runRead(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	return emit(stdout, stderr, msgs, f.outputOptions(false))
+	return f.emit(stdout, stderr, msgs, f.outputOptions(false))
 }

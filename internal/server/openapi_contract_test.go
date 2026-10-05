@@ -39,3 +39,33 @@ func TestOpenAPIRefreshAndSearchDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAPIRetrievalControls(t *testing.T) {
+	var d struct {
+		Paths map[string]map[string]struct {
+			Parameters []struct {
+				Ref  string `json:"$ref"`
+				Name string `json:"name"`
+			}
+		}
+	}
+	if err := json.Unmarshal(openAPIDocument, &d); err != nil {
+		t.Fatal(err)
+	}
+	for path, names := range map[string][]string{
+		"/v1/search":   {"CWD", "Hours", "PerSession", "ReduceNoise"},
+		"/v1/context":  {"CWD", "Hours", "WindowHours", "WindowMessages", "PerSession", "ReduceNoise"},
+		"/v1/commands": {"CWD", "Hours", "IncludeCurrent", "CommandMatch"},
+		"/v1/last":     {"CWD", "WindowHours", "limit"},
+	} {
+		for _, name := range names {
+			found := false
+			for _, p := range d.Paths[path]["get"].Parameters {
+				found = found || p.Ref == "#/components/parameters/"+name || p.Name == name
+			}
+			if !found {
+				t.Errorf("%s missing %s", path, name)
+			}
+		}
+	}
+}

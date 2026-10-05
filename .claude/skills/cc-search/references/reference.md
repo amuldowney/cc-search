@@ -19,7 +19,7 @@ cc-search serve                   loopback OpenAPI HTTP API
 ```
 
 Patterns and IDs are positional and must come before flags. Multi-word patterns
-must be quoted. A unique ID prefix is accepted by `read` and `activity`.
+must be quoted. A unique ID prefix is accepted by `read` and `activity`, but copy full IDs: Pi IDs begin with the session ID, not a unique message prefix.
 
 ## CLI flags
 
@@ -31,6 +31,7 @@ These are available on commands that open the index:
 |---|---|
 | `--index PATH` | derived index database (default `~/.claude/search-index.db`) |
 | `--transcripts DIR` | replace all default transcript roots with one root |
+| `--format json` / `--format text` | JSON default; readable full-ID blocks for query/browse/diagnostic commands |
 | `--refresh` | wait for latest transcripts before a read (otherwise snapshot-first) |
 | `--session ID` | restrict to a session where the command supports it |
 | `--all` | search/render full content, including tool calls and output |
@@ -41,11 +42,13 @@ These are available on commands that open the index:
 ### `last`
 
 ```text
---hours H       only messages from the last H hours
+--limit N       alias for positional N; explicit 0 is unlimited
+--cwd PATH      exact recorded session working directory
+--hours H       only messages from the last H hours (--window-hours alias)
 --type TYPE     restrict to user, assistant, system, ...
 ```
 
-`last` defaults to 10 messages. It returns newest messages first unless the
+`last` defaults to 10 messages when neither count nor hours is specified. Conflicting positional N and --limit values are rejected; time aliases must agree when both are supplied. It returns newest messages first unless the
 command is `read`, which returns its context oldest first.
 
 ### `search`
@@ -53,7 +56,10 @@ command is `read`, which returns its context oldest first.
 ```text
 --limit N             maximum results, default 20; 0 means no limit
 --window-messages M   search only the newest M messages
---window-hours H      search only the last H hours
+--window-hours H      search only the last H hours (--hours alias)
+--cwd PATH            exact recorded working directory
+--per-session N       maximum hits per session before total limit; 0 = no cap
+--reduce-noise        demote copied skill bodies and echoed search JSON
 --session ID          restrict to one session
 --include-current     include the current pi session
 --type TYPE           restrict by message type
@@ -116,6 +122,9 @@ available.
 --raw                use an FTS5 boolean expression
 ```
 
+`context` also accepts search time windows, --hours, --cwd, --per-session and
+--reduce-noise. Cwd is exact: sessions without cwd metadata do not match.
+
 The response contains the selected hits and a deduplicated chronological
 expansion. Expanded rows include the IDs of the hits that caused them to be
 selected.
@@ -123,6 +132,10 @@ selected.
 ### `commands`
 
 ```text
+--match MODE         arguments, output, or both (default)
+--cwd PATH           exact recorded working directory
+--hours H            only the last H hours (--window-hours alias)
+--include-current    include current pi session
 --tool NAME          restrict to one tool, for example Bash
 --session ID         restrict to one session
 --limit N            maximum rows, default 20; `0` means unlimited
@@ -131,10 +144,13 @@ selected.
 --output             alias for `--include-output`
 ```
 
-This command searches full message content because command text commonly lives
-in tool arguments or tool results. It returns a normalized tool name,
-structured arguments, source message/session IDs, timestamp, and optional
-paired output.
+This command searches indexed individual invocations and their paired outputs,
+not surrounding prose or sibling calls. In both mode, terms may span arguments
+and outputs of the same invocation. The arguments scope includes the tool name.
+Include-output/full changes display, not match scope. Results are newest-first,
+with structured arguments, source message/session IDs and optional paired output.
+Current-session exclusion and explicit-session override work as in search.
+Command arguments/output are not covered by the message-body budget.
 
 ### `serve`
 
@@ -149,7 +165,9 @@ The API has no authentication and must remain loopback-only.
 
 ## Output
 
-Data commands emit one JSON object on stdout. Warnings and errors go to stderr.
+Data commands default to one JSON object on stdout. `--format text` prints
+readable blocks with full IDs and visible relaxed/truncated/budget notices;
+info/doctor use pretty JSON in text mode. The HTTP API always stays JSON. Warnings and errors go to stderr.
 `help`, `serve`, and `rebuild` also print human-readable status text where
 appropriate. A typical compact search response is:
 
@@ -173,9 +191,12 @@ appropriate. A typical compact search response is:
 ```
 
 `--full` replaces `preview` with `content`; compact responses never emit both.
-`charCount` remains the full content length. `truncated` is true when `--limit`
+`charCount` remains the full content length. Compact search previews center on
+FTS matches; read/last use prefixes. Full bodies are never replaced by snippets. `truncated` is true when `--limit`
 or the output budget prevents all selected results from being emitted.
 
+The budget covers message bodies, not metadata/JSON bytes or the separate
+context hit list. `total` is the returned count, not the total available matches.
 The budget is applied to rendered output:
 
 - preview mode shortens previews to fit more results, down to a 40-character
@@ -197,6 +218,15 @@ The budget is applied to rendered output:
   `192.168.1.112`. Raw queries are never relaxed, and `--raw --any` is rejected.
 - `--all` switches from `prose` to `content`; it is the right choice for a path,
   command, error, file dump, or tool-only message.
+
+## Optional relevance controls
+
+`--cwd` is exact (not recursive). `--per-session N` selects a session
+cap before the overall limit, without an arbitrary candidate cutoff.
+`--reduce-noise` demotes likely copied skill frontmatter and echoed cc-search
+JSON using conservative cached-prefix heuristics. It does not exclude matches
+or establish trust. Both relevance controls are opt-in; original rank order
+remains the default. Disable noise reduction to investigate copied artifacts.
 
 ## Sources and index maintenance
 
@@ -247,7 +277,7 @@ unsupported-platform fallback does not claim a lifecycle lock.
 | `no such module: fts5` | Rebuild with `make build`; the `sqlite_fts5` tag is mandatory. |
 | No matches for a command or error | Add `--all`; it may only be in tool output. |
 | `relaxed: true` | The exact AND query had no match; narrow or improve the query. |
-| Missing one agent's sessions | Run `cc-search info`; check both default roots or pass `--transcripts`. |
+| Missing one agent's sessions | Run `cc-search info --sources`; inspect indexed source files and configured roots, or pass `--transcripts`. |
 | Missing recent conversation | Retry with `--refresh` or run `cc-search refresh`. |
 | Unhealthy index | Run `cc-search doctor`, then `cc-search rebuild`. |
 | Concurrent access failure | Wait for the other process; the lock timeout names the index. |

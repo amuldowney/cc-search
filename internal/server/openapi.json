@@ -91,6 +91,18 @@
           },
           {
             "$ref": "#/components/parameters/Refresh"
+          },
+          {
+            "$ref": "#/components/parameters/CWD"
+          },
+          {
+            "$ref": "#/components/parameters/Hours"
+          },
+          {
+            "$ref": "#/components/parameters/PerSession"
+          },
+          {
+            "$ref": "#/components/parameters/ReduceNoise"
           }
         ],
         "responses": {
@@ -140,6 +152,21 @@
           },
           {
             "$ref": "#/components/parameters/Refresh"
+          },
+          {
+            "$ref": "#/components/parameters/CWD"
+          },
+          {
+            "$ref": "#/components/parameters/WindowHours"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Alias for count; explicit zero is unlimited. Supplied aliases must agree.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -422,6 +449,24 @@
           },
           {
             "$ref": "#/components/parameters/Refresh"
+          },
+          {
+            "$ref": "#/components/parameters/CWD"
+          },
+          {
+            "$ref": "#/components/parameters/Hours"
+          },
+          {
+            "$ref": "#/components/parameters/WindowHours"
+          },
+          {
+            "$ref": "#/components/parameters/WindowMessages"
+          },
+          {
+            "$ref": "#/components/parameters/PerSession"
+          },
+          {
+            "$ref": "#/components/parameters/ReduceNoise"
           }
         ],
         "responses": {
@@ -480,6 +525,21 @@
           },
           {
             "$ref": "#/components/parameters/Refresh"
+          },
+          {
+            "$ref": "#/components/parameters/CWD"
+          },
+          {
+            "$ref": "#/components/parameters/Hours"
+          },
+          {
+            "$ref": "#/components/parameters/WindowHours"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeCurrent"
+          },
+          {
+            "$ref": "#/components/parameters/CommandMatch"
           }
         ],
         "responses": {
@@ -496,7 +556,8 @@
           "400": {
             "$ref": "#/components/responses/InvalidInput"
           }
-        }
+        },
+        "description": "Search indexed individual tool invocations newest first. Arguments and paired output may match; unrelated sibling calls and surrounding prose never select an invocation. Excludes the current pi session unless include_current or an explicit session is given."
       }
     },
     "/v1/info": {
@@ -625,7 +686,8 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
-        }
+        },
+        "description": "Only messages/calls from the last H hours; alias of window_hours. Supplied aliases must agree."
       },
       "WindowMessages": {
         "name": "window_messages",
@@ -643,7 +705,8 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
-        }
+        },
+        "description": "Only messages/calls from the last H hours; alias of hours. Supplied aliases must agree."
       },
       "Before": {
         "name": "before",
@@ -728,6 +791,47 @@
         "schema": {
           "type": "boolean",
           "default": false
+        }
+      },
+      "CWD": {
+        "name": "cwd",
+        "in": "query",
+        "description": "Exact recorded session working directory; missing cwd does not match.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PerSession": {
+        "name": "per_session",
+        "in": "query",
+        "description": "Maximum hits from one session, applied before total hit limit. Zero disables diversification.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "ReduceNoise": {
+        "name": "reduce_noise",
+        "in": "query",
+        "description": "Opt-in demotion of likely copied skill bodies and echoed search-result JSON. Does not remove matches or establish trust.",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "CommandMatch": {
+        "name": "match",
+        "in": "query",
+        "description": "Match tool name/arguments and/or paired output of one invocation, not siblings or surrounding prose. Independent of include_output.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "arguments",
+            "output",
+            "both"
+          ],
+          "default": "both"
         }
       }
     },
