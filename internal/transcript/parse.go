@@ -12,13 +12,16 @@ import (
 
 // Message is a single indexable message extracted from a transcript line.
 type Message struct {
-	ID             string
-	EntryID        string // original transcript entry id, before any index disambiguation
-	SessionID      string
-	Timestamp      int64 // unix milliseconds
-	Type           string
-	Content        string
-	Prose          string // just what was said: text blocks, no tool calls or results
+	ID        string
+	EntryID   string // original transcript entry id, before any index disambiguation
+	SessionID string
+	Timestamp int64 // unix milliseconds
+	Type      string
+	Content   string
+	Prose     string // just what was said: text blocks, no tool calls or results
+	// SearchPreview is a transient FTS-derived excerpt for selected search hits.
+	// It is not persisted and is ignored when full content is requested.
+	SearchPreview  string `json:"-"`
 	CharCount      int    // original UTF-8 byte length of Content
 	ProseCharCount int    // original UTF-8 byte length of Prose
 

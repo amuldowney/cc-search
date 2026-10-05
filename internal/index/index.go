@@ -155,6 +155,7 @@ type LastOptions struct {
 	N         int
 	Hours     int
 	SessionID string
+	CWD       string
 	Type      string
 	ProseOnly bool
 	// PreviewLength uses cached bodies up to 512 runes; zero or larger values use full bodies.
@@ -177,6 +178,12 @@ type SearchOptions struct {
 	// Raw passes Query to FTS5 untouched, so it may use OR, NOT, NEAR,
 	// grouping and phrases. Punctuation must then be quoted by the caller.
 	Raw bool
+	// CWD restricts results to transcripts whose recorded working directory exactly matches.
+	CWD string
+	// PerSession limits each session before the overall Limit; zero means no cap.
+	PerSession int
+	// ReduceNoise demotes copied skill frontmatter and echoed cc-search response JSON.
+	ReduceNoise bool
 	// PreviewLength uses cached bodies up to 512 runes; zero or larger values use full bodies.
 	PreviewLength int
 }
@@ -966,6 +973,10 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 		query += ` AND m.sessionId = ?`
 		args = append(args, opts.SessionID)
 	}
+	if opts.CWD != "" {
+		query += ` AND EXISTS (SELECT 1 FROM sessions cwdSession WHERE cwdSession.sourcePath = m.sourcePath AND cwdSession.cwd = ?)`
+		args = append(args, opts.CWD)
+	}
 	if opts.Type != "" {
 		query += ` AND m.type = ?`
 		args = append(args, opts.Type)
@@ -988,6 +999,9 @@ func (d *DB) Last(opts LastOptions) ([]transcript.Message, error) {
 
 // Search returns messages matching opts.Query, most relevant first.
 func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
+	if opts.PerSession < 0 {
+		return nil, errors.New("per-session limit must be non-negative")
+	}
 	match := ftsQuery(opts.Query, opts.Any)
 	if opts.Raw {
 		match = strings.TrimSpace(opts.Query)
@@ -1000,17 +1014,14 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 	}
 
 	compact := opts.PreviewLength > 0 && opts.PreviewLength <= maxCompactPreviewLength
-	query := `
-		SELECT ` + selectColumns("m", compact) + `
-		FROM messages_fts f
-		JOIN messages m ON m.rowid = f.rowid
-		LEFT JOIN message_projections p ON p.messageId = m.id` + activityJoins("m") + `
-		WHERE f.messages_fts MATCH ?`
+	candidateJoins := `FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
+		LEFT JOIN message_projections p ON p.messageId = m.id`
+	candidateWhere := ` WHERE f.messages_fts MATCH ?`
 	args := []any{match}
 
 	// Restrict the FTS candidates to the latest N rows only when the caller
-	// actually asks for a message-count history window. Unrestricted searches
-	// filter session, exclusion, and age directly on the FTS result rows.
+	// actually asks for a message-count history window. CWD is applied inside
+	// that window selection, before its timestamp ordering and limit.
 	if opts.WindowMessages > 0 {
 		window := `SELECT rowid FROM messages WHERE 1 = 1`
 		if opts.SessionID != "" {
@@ -1020,44 +1031,93 @@ func (d *DB) Search(opts SearchOptions) ([]transcript.Message, error) {
 			window += ` AND sessionId != ?`
 			args = append(args, opts.ExcludeSessionID)
 		}
+		if opts.CWD != "" {
+			window += ` AND EXISTS (SELECT 1 FROM sessions cwdSession WHERE cwdSession.sourcePath = messages.sourcePath AND cwdSession.cwd = ?)`
+			args = append(args, opts.CWD)
+		}
 		if opts.WindowHours > 0 {
 			window += ` AND timestamp >= ?`
 			args = append(args, since(opts.WindowHours))
 		}
 		window += ` ORDER BY timestamp DESC LIMIT ?`
 		args = append(args, opts.WindowMessages)
-		query += ` AND m.rowid IN (` + window + `)`
+		candidateWhere += ` AND m.rowid IN (` + window + `)`
 	} else {
 		if opts.SessionID != "" {
-			query += ` AND m.sessionId = ?`
+			candidateWhere += ` AND m.sessionId = ?`
 			args = append(args, opts.SessionID)
 		} else if opts.ExcludeSessionID != "" {
-			query += ` AND m.sessionId != ?`
+			candidateWhere += ` AND m.sessionId != ?`
 			args = append(args, opts.ExcludeSessionID)
 		}
+		if opts.CWD != "" {
+			candidateWhere += ` AND EXISTS (SELECT 1 FROM sessions cwdSession WHERE cwdSession.sourcePath = m.sourcePath AND cwdSession.cwd = ?)`
+			args = append(args, opts.CWD)
+		}
 		if opts.WindowHours > 0 {
-			query += ` AND m.timestamp >= ?`
+			candidateWhere += ` AND m.timestamp >= ?`
 			args = append(args, since(opts.WindowHours))
 		}
 	}
-
 	if opts.Type != "" {
-		query += ` AND m.type = ?`
+		candidateWhere += ` AND m.type = ?`
 		args = append(args, opts.Type)
 	}
-	query += ` ORDER BY bm25(f.messages_fts), m.timestamp DESC`
 
+	noise := "0"
+	if opts.ReduceNoise {
+		noise = searchNoiseCase("p.contentPrefix", "p.prosePrefix")
+	}
+	var query string
+	if opts.PerSession > 0 {
+		// FTS5's bm25() cannot be evaluated in a window expression. Materialize
+		// one score per candidate, then apply the per-session rank without an
+		// arbitrary overfetch cutoff that could hide quieter sessions.
+		query = `WITH candidates AS MATERIALIZED (
+				SELECT m.rowid AS rowid, m.sessionId AS sessionId, m.timestamp AS timestamp,
+				       bm25(f.messages_fts) AS score, ` + noise + ` AS noise
+				` + candidateJoins + candidateWhere + `
+			), ranked AS (
+				SELECT candidates.*,
+				       ROW_NUMBER() OVER (PARTITION BY sessionId ORDER BY ` + sessionSearchOrder(opts.ReduceNoise, "noise", "score", "timestamp", "rowid") + `) AS session_rank
+				FROM candidates
+			)
+			SELECT ` + selectColumns("m", compact) + `
+			FROM ranked r
+			JOIN messages m ON m.rowid = r.rowid
+			LEFT JOIN message_projections p ON p.messageId = m.id` + activityJoins("m") + `
+			WHERE r.session_rank <= ?
+			ORDER BY ` + sessionSearchOrder(opts.ReduceNoise, "r.noise", "r.score", "r.timestamp", "r.rowid")
+		args = append(args, opts.PerSession)
+	} else {
+		tieBreak := ""
+		if opts.ReduceNoise {
+			tieBreak = "m.rowid"
+		}
+		query = `SELECT ` + selectColumns("m", compact) + `
+			` + candidateJoins + activityJoins("m") + candidateWhere + `
+			ORDER BY ` + sessionSearchOrder(opts.ReduceNoise, noise, "bm25(f.messages_fts)", "m.timestamp", tieBreak)
+	}
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
 	}
 
 	msgs, err := d.collect(query, compact, args...)
-	if err != nil && opts.Raw {
-		// The caller wrote this expression, so a failure here is theirs.
-		return nil, fmt.Errorf("%w: %w", ErrBadQuery, err)
+	if err != nil {
+		if opts.Raw {
+			// The caller wrote this expression, so a failure here is theirs.
+			return nil, fmt.Errorf("%w: %w", ErrBadQuery, err)
+		}
+		return nil, err
 	}
-	return msgs, err
+	if err := d.fillSearchPreviews(match, opts.ProseOnly, opts.PreviewLength, msgs); err != nil {
+		if opts.Raw {
+			return nil, fmt.Errorf("%w: %w", ErrBadQuery, err)
+		}
+		return nil, err
+	}
+	return msgs, nil
 }
 
 func (d *DB) collect(query string, compact bool, args ...any) ([]transcript.Message, error) {

@@ -205,6 +205,9 @@ func Format(msgs []transcript.Message, opts Options) Response {
 		if opts.UseProse {
 			bodies[i] = m.Prose
 		}
+		if !opts.Full && m.SearchPreview != "" {
+			bodies[i] = m.SearchPreview
+		}
 		if opts.Full {
 			natural[i] = utf8.RuneCountInString(bodies[i])
 		} else {

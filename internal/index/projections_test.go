@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -34,9 +35,8 @@ func TestCompactReadProjectionPreservesPreviewAndOriginalCounts(t *testing.T) {
 		t.Fatalf("original byte counts = content %d prose %d, want %d", got[0].CharCount, got[0].ProseCharCount, len(storedBody))
 	}
 	formatted := output.Format(got, output.Options{PreviewLength: 20, UseProse: true})
-	want := string([]rune(flat)[:20]) + "…"
-	if formatted.Results[0].Preview != want || formatted.Results[0].CharCount != len(storedBody) {
-		t.Fatalf("formatted result = %+v, want preview %q and original byte count %d", formatted.Results[0], want, len(storedBody))
+	if !strings.Contains(formatted.Results[0].Preview, "wide") || utf8.RuneCountInString(formatted.Results[0].Preview) > 20 || formatted.Results[0].CharCount != len(storedBody) {
+		t.Fatalf("formatted search result = %+v, want a matching preview within 20 runes and original byte count %d", formatted.Results[0], len(storedBody))
 	}
 
 	last, err := db.Last(LastOptions{N: 1, PreviewLength: 20})
@@ -66,9 +66,8 @@ func TestCompactProjectionHandlesTrailingWhitespaceAtMaxPreviewBoundary(t *testi
 		t.Fatalf("got %d boundary search results, want 1", len(got))
 	}
 	formatted := output.Format(got, output.Options{PreviewLength: 512})
-	want := strings.Repeat("x", 512) + "…"
-	if len(got) != 1 || formatted.Results[0].Preview != want {
-		t.Fatalf("max-boundary preview = %q (cached runes %d), want ellipsis after 512 x runes", formatted.Results[0].Preview, len([]rune(got[0].Content)))
+	if len(got) != 1 || !strings.Contains(formatted.Results[0].Preview, "trailing") || utf8.RuneCountInString(formatted.Results[0].Preview) > 512 {
+		t.Fatalf("max-boundary search preview = %q (cached runes %d), want the late match within 512 runes", formatted.Results[0].Preview, len([]rune(got[0].Content)))
 	}
 }
 
@@ -83,8 +82,8 @@ func TestCompactProjectionHandlesTinyAndExactPreviewLengths(t *testing.T) {
 		t.Fatalf("got %d exact-preview results, want 1", len(got))
 	}
 	formatted := output.Format(got, output.Options{PreviewLength: 2})
-	if formatted.Results[0].Preview != "é …" {
-		t.Fatalf("exact-length preview = %q, want %q", formatted.Results[0].Preview, "é …")
+	if !strings.Contains(formatted.Results[0].Preview, "雪") || utf8.RuneCountInString(formatted.Results[0].Preview) > 2 {
+		t.Fatalf("exact-length search preview = %q, want the match within two runes", formatted.Results[0].Preview)
 	}
 	got, err = db.Search(SearchOptions{Query: "雪", PreviewLength: 1})
 	if err != nil {
@@ -94,8 +93,8 @@ func TestCompactProjectionHandlesTinyAndExactPreviewLengths(t *testing.T) {
 		t.Fatalf("got %d tiny-preview results, want 1", len(got))
 	}
 	formatted = output.Format(got, output.Options{PreviewLength: 1})
-	if formatted.Results[0].Preview != "é…" {
-		t.Fatalf("tiny preview = %q, want %q", formatted.Results[0].Preview, "é…")
+	if formatted.Results[0].Preview != "雪" {
+		t.Fatalf("tiny search preview = %q, want the one-rune match", formatted.Results[0].Preview)
 	}
 }
 
