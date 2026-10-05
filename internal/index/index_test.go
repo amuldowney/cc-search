@@ -74,8 +74,8 @@ func TestSchemaDoesNotStoreRecapMetadata(t *testing.T) {
 	if err := db.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
-		t.Fatalf("schema version = %d, want 8", version)
+	if version != 9 {
+		t.Fatalf("schema version = %d, want 9", version)
 	}
 
 	var columns int
@@ -385,7 +385,7 @@ func TestOpenRefusesNewerSchemaWithoutDeletingIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.sql.Exec(`PRAGMA user_version = 9`); err != nil {
+	if _, err := db.sql.Exec(`PRAGMA user_version = 10`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -408,8 +408,8 @@ func TestOpenRefusesNewerSchemaWithoutDeletingIndex(t *testing.T) {
 	if err := check.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 {
-		t.Fatalf("index schema version after refusal = %d, want 9", version)
+	if version != 10 {
+		t.Fatalf("index schema version after refusal = %d, want 10", version)
 	}
 }
 

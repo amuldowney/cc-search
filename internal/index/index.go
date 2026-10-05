@@ -24,9 +24,9 @@ import (
 	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
-// schemaVersion is bumped whenever the tables change. Version 7 indexes can be
-// upgraded by the additive read-projection migration helper.
-const schemaVersion = 8
+// schemaVersion is bumped whenever the tables change. Versions 7 and 8 can be
+// upgraded through additive read-projection and command-search migrations.
+const schemaVersion = 9
 
 // SchemaVersion is the current derived-index schema version.
 const SchemaVersion = schemaVersion
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS files (
   mtime INTEGER,
   size  INTEGER
 );
-` + projectionSchema
+` + projectionSchema + commandSearchSchema
 
 // DB is an open index database.
 type DB struct {
@@ -265,7 +265,7 @@ func open(path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("check schema contents: %w", err)
 	}
-	if version != schemaVersion && version != 7 && !empty {
+	if version != schemaVersion && version != 7 && version != 8 && !empty {
 		handle.Close()
 		if version > schemaVersion {
 			return nil, fmt.Errorf("%w: index has schema version %d, but this binary supports %d; deploy a newer cc-search",
@@ -291,6 +291,13 @@ func open(path string) (*DB, error) {
 		if err := migrateReadProjections(handle); err != nil {
 			handle.Close()
 			return nil, fmt.Errorf("migrate read projections: %w", err)
+		}
+		version = 8
+	}
+	if version == 8 && !empty {
+		if err := migrateCommandSearch(handle); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("migrate command search: %w", err)
 		}
 	}
 	if empty {
@@ -1101,6 +1108,21 @@ func ftsQuery(pattern string, any bool) string {
 	return strings.Join(terms, join)
 }
 
+// commandFTSQuery creates invocation-scoped FTS expressions. In both mode each
+// term independently matches either column, while FTS applies all clauses to
+// the same invocation row.
+func commandFTSQuery(pattern, match string) string {
+	if match != "both" {
+		return "{" + match + "} : (" + ftsQuery(pattern, false) + ")"
+	}
+	var clauses []string
+	for _, term := range strings.Fields(pattern) {
+		quoted := ftsQuery(term, false)
+		clauses = append(clauses, "({arguments} : ("+quoted+") OR {output} : ("+quoted+"))")
+	}
+	return strings.Join(clauses, " AND ")
+}
+
 // TermCount reports how many terms a pattern will search for.
 func TermCount(pattern string) int { return len(strings.Fields(pattern)) }
 
@@ -1302,14 +1324,18 @@ func (d *DB) collectActivities(query string, args ...any) ([]ActivityRecord, err
 }
 
 // CommandOptions selects exact tool invocations. Query is matched against the
-// full indexed message, so either invocation arguments or a paired result can
-// locate a command.
+// invocation's indexed arguments and/or paired output, never sibling calls or
+// surrounding message prose.
 type CommandOptions struct {
-	Query         string
-	Tool          string
-	SessionID     string
-	Limit         int
-	IncludeOutput bool
+	Query            string
+	Tool             string
+	SessionID        string
+	Limit            int
+	IncludeOutput    bool
+	Match            string // empty or "both", "arguments", or "output"
+	CWD              string
+	Hours            int
+	ExcludeSessionID string
 }
 
 // CommandRecord is a normalized historical tool invocation.
@@ -1322,34 +1348,52 @@ type CommandRecord struct {
 	Output    string
 }
 
-// Commands returns indexed tool invocations newest first. FTS hits on either
-// the invocation or a linked result select the invocation; output text is only
-// read for selected invocations when IncludeOutput is requested.
+// Commands returns indexed tool invocations newest first. Full output is read
+// only for selected invocations when IncludeOutput is requested.
 func (d *DB) Commands(opts CommandOptions) ([]CommandRecord, error) {
+	match := opts.Match
+	if match == "" {
+		match = "both"
+	}
+	if match != "both" && match != "arguments" && match != "output" {
+		return nil, fmt.Errorf("invalid command match mode %q (want both, arguments, or output)", opts.Match)
+	}
 	if opts.Query != "" && ftsQuery(opts.Query, false) == "" {
 		return []CommandRecord{}, nil
 	}
 	query := `SELECT i.invocationId, i.toolName, i.arguments, i.sessionId, i.messageId, i.timestamp
-		FROM tool_invocations i WHERE 1 = 1`
+		FROM tool_invocations i
+		JOIN messages m ON m.id = i.messageId
+		JOIN sessions s ON s.sourcePath = m.sourcePath
+		WHERE 1 = 1`
 	args := []any{}
 	if opts.Query != "" {
-		match := ftsQuery(opts.Query, false)
-		query = `WITH matched_messages AS (
-			SELECT m.id FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
-			WHERE f.messages_fts MATCH ?)
-		` + query
-		args = append(args, match)
-		query += ` AND (i.messageId IN (SELECT id FROM matched_messages)
-			OR i.invocationId IN (SELECT r.invocationId FROM tool_results r
-				JOIN matched_messages mm ON mm.id = r.messageId WHERE r.invocationId IS NOT NULL))`
+		query = `SELECT i.invocationId, i.toolName, i.arguments, i.sessionId, i.messageId, i.timestamp
+			FROM command_fts f
+			JOIN tool_invocations i ON i.invocationId = f.rowid
+			JOIN messages m ON m.id = i.messageId
+			JOIN sessions s ON s.sourcePath = m.sourcePath
+			WHERE command_fts MATCH ?`
+		args = append(args, commandFTSQuery(opts.Query, match))
 	}
 	if opts.SessionID != "" {
 		query += ` AND i.sessionId = ?`
 		args = append(args, opts.SessionID)
+	} else if opts.ExcludeSessionID != "" {
+		query += ` AND i.sessionId != ?`
+		args = append(args, opts.ExcludeSessionID)
 	}
 	if opts.Tool != "" {
 		query += ` AND lower(i.toolName) = lower(?)`
 		args = append(args, opts.Tool)
+	}
+	if opts.CWD != "" {
+		query += ` AND s.cwd = ?`
+		args = append(args, opts.CWD)
+	}
+	if opts.Hours > 0 {
+		query += ` AND i.timestamp >= ?`
+		args = append(args, since(opts.Hours))
 	}
 	query += ` ORDER BY i.timestamp DESC, i.messageId, i.invocationId`
 	if opts.Limit > 0 {

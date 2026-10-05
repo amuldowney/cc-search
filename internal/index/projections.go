@@ -62,6 +62,78 @@ CREATE INDEX IF NOT EXISTS idx_tool_results_session_tool ON tool_results(session
 CREATE INDEX IF NOT EXISTS idx_tool_results_message ON tool_results(messageId);
 `
 
+// commandSearchSchema stores invocation-scoped FTS columns and maintains them
+// transactionally as invocations are inserted/deleted and results are paired.
+const commandSearchSchema = `
+CREATE TABLE IF NOT EXISTS command_search_content (
+  invocationId INTEGER PRIMARY KEY,
+  arguments    TEXT NOT NULL,
+  output       TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS command_fts USING fts5(
+  arguments,
+  output,
+  content='command_search_content',
+  content_rowid='invocationId',
+  tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS command_search_content_ai AFTER INSERT ON command_search_content BEGIN
+  INSERT INTO command_fts(rowid, arguments, output) VALUES (new.invocationId, new.arguments, new.output);
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_content_ad AFTER DELETE ON command_search_content BEGIN
+  INSERT INTO command_fts(command_fts, rowid, arguments, output)
+    VALUES ('delete', old.invocationId, old.arguments, old.output);
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_content_au AFTER UPDATE ON command_search_content BEGIN
+  INSERT INTO command_fts(command_fts, rowid, arguments, output)
+    VALUES ('delete', old.invocationId, old.arguments, old.output);
+  INSERT INTO command_fts(rowid, arguments, output) VALUES (new.invocationId, new.arguments, new.output);
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_invocation_ai AFTER INSERT ON tool_invocations BEGIN
+  INSERT INTO command_search_content(invocationId, arguments, output)
+  VALUES (new.invocationId, new.toolName || ' ' || new.arguments, '');
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_invocation_au AFTER UPDATE OF toolName, arguments ON tool_invocations BEGIN
+  UPDATE command_search_content SET arguments = new.toolName || ' ' || new.arguments
+    WHERE invocationId = new.invocationId;
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_invocation_ad AFTER DELETE ON tool_invocations BEGIN
+  DELETE FROM command_search_content WHERE invocationId = old.invocationId;
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_result_ai AFTER INSERT ON tool_results
+WHEN new.invocationId IS NOT NULL BEGIN
+  UPDATE command_search_content SET output = COALESCE((
+    SELECT group_concat(content, char(10)) FROM (
+      SELECT content FROM tool_results WHERE invocationId = new.invocationId AND content != ''
+      ORDER BY timestamp, resultId
+    )
+  ), '') WHERE invocationId = new.invocationId;
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_result_au AFTER UPDATE OF invocationId, content, timestamp ON tool_results BEGIN
+  UPDATE command_search_content SET output = COALESCE((
+    SELECT group_concat(content, char(10)) FROM (
+      SELECT content FROM tool_results WHERE invocationId = old.invocationId AND content != ''
+      ORDER BY timestamp, resultId
+    )
+  ), '') WHERE invocationId = old.invocationId;
+  UPDATE command_search_content SET output = COALESCE((
+    SELECT group_concat(content, char(10)) FROM (
+      SELECT content FROM tool_results WHERE invocationId = new.invocationId AND content != ''
+      ORDER BY timestamp, resultId
+    )
+  ), '') WHERE invocationId = new.invocationId;
+END;
+CREATE TRIGGER IF NOT EXISTS command_search_result_ad AFTER DELETE ON tool_results
+WHEN old.invocationId IS NOT NULL BEGIN
+  UPDATE command_search_content SET output = COALESCE((
+    SELECT group_concat(content, char(10)) FROM (
+      SELECT content FROM tool_results WHERE invocationId = old.invocationId AND content != ''
+      ORDER BY timestamp, resultId
+    )
+  ), '') WHERE invocationId = old.invocationId;
+END;
+`
+
 const projectionPrefixRunes = 514
 const maxCompactPreviewLength = 512
 
@@ -250,7 +322,7 @@ func migrateReadProjections(db *sql.DB) error {
 	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	if version == schemaVersion {
+	if version == 8 || version == schemaVersion {
 		return nil
 	}
 	if version != 7 {
@@ -337,6 +409,46 @@ func migrateReadProjections(db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit read projection migration: %w", err)
+	}
+	return nil
+}
+
+// migrateCommandSearch adds the version 9 invocation FTS read model without
+// parsing transcripts or modifying messages, FTS rowids, or other projections.
+func migrateCommandSearch(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if version != 8 {
+		return fmt.Errorf("command search migration requires schema version 8, got %d", version)
+	}
+	if _, err := tx.Exec(commandSearchSchema); err != nil {
+		return fmt.Errorf("create command search schema: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO command_search_content(invocationId, arguments, output)
+		SELECT i.invocationId, i.toolName || ' ' || i.arguments,
+			COALESCE((SELECT group_concat(content, char(10)) FROM (
+				SELECT content FROM tool_results r
+				WHERE r.invocationId = i.invocationId AND r.content != ''
+				ORDER BY r.timestamp, r.resultId
+			)), '')
+		FROM tool_invocations i`); err != nil {
+		return fmt.Errorf("populate command search content: %w", err)
+	}
+	if _, err := tx.Exec(`PRAGMA user_version = 9`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit command search migration: %w", err)
 	}
 	return nil
 }

@@ -274,7 +274,7 @@ func openForRefresh(path string) (*DB, error) {
 
 func validateReaderSchema(handle *sql.DB) error {
 	var missing []string
-	for _, table := range []string{"messages", "messages_fts", "sessions", "activities", "files", "message_projections", "source_projections", "tool_invocations", "tool_results"} {
+	for _, table := range []string{"messages", "messages_fts", "sessions", "activities", "files", "message_projections", "source_projections", "tool_invocations", "tool_results", "command_search_content", "command_fts"} {
 		var count int
 		if err := handle.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = ? AND type IN ('table','view')`, table).Scan(&count); err != nil {
 			return fmt.Errorf("validate index schema: %w", err)
