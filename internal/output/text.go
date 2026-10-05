@@ -190,7 +190,7 @@ func renderCommands(out *bytes.Buffer, response CommandsResponse) error {
 			return fmt.Errorf("marshal command arguments: %w", err)
 		}
 		out.WriteString("Arguments:\n")
-		out.Write(arguments)
+		out.WriteString(safeBody(string(arguments)))
 		out.WriteByte('\n')
 		if command.Output != "" {
 			writeBody(out, "Output", command.Output)
@@ -354,7 +354,7 @@ func writeJSONText(w io.Writer, value any) error {
 	if err != nil {
 		return fmt.Errorf("marshal text fallback: %w", err)
 	}
-	return writeAll(w, append(encoded, '\n'))
+	return writeAll(w, []byte(safeBody(string(encoded))+"\n"))
 }
 
 func writeAll(w io.Writer, data []byte) error {
