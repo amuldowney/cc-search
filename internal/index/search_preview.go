@@ -37,6 +37,8 @@ func searchNoiseCase(contentPrefix, prosePrefix string) string {
 	return `CASE
 		WHEN ` + prefix + ` LIKE '---%' AND ` + prefix + ` LIKE '%name:%' AND ` + prefix + ` LIKE '%description:%' THEN 1
 		WHEN ` + prefix + ` LIKE '%"results"%' AND ` + prefix + ` LIKE '%"budget"%' AND ` + prefix + ` LIKE '%"relaxed"%' THEN 1
+        WHEN ` + prefix + ` LIKE '{"results":%' AND ` + prefix + ` LIKE '%"sessionid":%' AND ` + prefix + ` LIKE '%"id":%' THEN 1
+        WHEN ` + prefix + ` LIKE '{"commands":%' AND ` + prefix + ` LIKE '%"messageid":%' AND ` + prefix + ` LIKE '%"tool":%' THEN 1
 		ELSE 0 END`
 }
 
@@ -110,9 +112,9 @@ func (d *DB) fillSearchPreviewBatch(match string, column, maxRunes int, messages
 	return nil
 }
 
-// compactMarkedSnippet strips the private FTS markers, moves the match to the
-// front so further output-budget trimming cannot lose a late match, and clips
-// on Unicode rune boundaries while retaining omission marks.
+// compactMarkedSnippet preserves the selected passage verbatim after whitespace
+// normalization. Retain immediate pre-match context (including negations) and
+// punctuation; never turn an identifier like foo.bar into "foo .bar".
 func compactMarkedSnippet(raw string, maxRunes int) (string, bool) {
 	flat, matchStart, matchEnd, ok := flattenMarkedSnippet(raw)
 	if !ok || maxRunes <= 0 {
@@ -122,54 +124,36 @@ func compactMarkedSnippet(raw string, maxRunes int) (string, bool) {
 	if matchEnd > len(runes) || matchStart < 0 || matchEnd <= matchStart {
 		return "", false
 	}
-
+	if len(runes) <= maxRunes {
+		return flat, true
+	}
+	if maxRunes == 1 {
+		return string(runes[matchStart]), true
+	}
+	context := min(maxRunes/4, 16)
+	start := max(0, matchStart-context)
+	// Start at a word boundary without advancing beyond the first match.
+	for start > 0 && start < matchStart && !unicode.IsSpace(runes[start-1]) {
+		start++
+	}
 	prefix := ""
-	if maxRunes > 2 && (matchStart > 0 || strings.HasPrefix(flat, "…")) {
+	if start > 0 && maxRunes > 3 {
 		prefix = "… "
 	}
-	out := []rune(prefix)
-	match := runes[matchStart:matchEnd]
-	if len(out)+len(match) > maxRunes {
-		room := maxRunes - len(out)
-		if room <= 0 {
-			return string(out[:maxRunes]), true
+	room := maxRunes - len([]rune(prefix))
+	if matchEnd-start > room && matchEnd-matchStart <= room {
+		start = matchEnd - room
+		if start > 0 && maxRunes > 3 {
+			prefix = "… "
+			room = maxRunes - 2
 		}
-		out = append(out, match[:room]...)
+	}
+	end := min(len(runes), start+room)
+	out := append([]rune(prefix), runes[start:end]...)
+	if end < len(runes) {
 		markTruncated(&out, maxRunes)
-		return string(out), true
 	}
-	out = append(out, match...)
-
-	tail := runes[matchEnd:]
-	for len(tail) > 0 && unicode.IsSpace(tail[0]) {
-		tail = tail[1:]
-	}
-	suffixOmitted := len(runes) > 0 && runes[len(runes)-1] == '…'
-	if len(tail) > 0 {
-		if len(out) < maxRunes {
-			out = append(out, ' ')
-		}
-		room := maxRunes - len(out)
-		if room == 0 {
-			if len(out) > 0 && out[len(out)-1] == ' ' {
-				out = out[:len(out)-1]
-			}
-			return string(out), true
-		}
-		if room < len(tail) {
-			out = append(out, tail[:room]...)
-			markTruncated(&out, maxRunes)
-			return string(out), true
-		}
-		out = append(out, tail...)
-	} else if suffixOmitted {
-		if len(out)+2 <= maxRunes {
-			out = append(out, ' ', '…')
-		} else if len(out) < maxRunes {
-			out = append(out, '…')
-		}
-	}
-	return string(out), true
+	return strings.TrimSpace(string(out)), true
 }
 
 func markTruncated(out *[]rune, maxRunes int) {
