@@ -19,6 +19,7 @@ import (
 
 	"github.com/amuldowney/cc-search/internal/index"
 	"github.com/amuldowney/cc-search/internal/output"
+	"github.com/amuldowney/cc-search/internal/redact"
 	"github.com/amuldowney/cc-search/internal/server"
 	"github.com/amuldowney/cc-search/internal/transcript"
 )
@@ -66,7 +67,8 @@ commands:
   context PATTERN [options]             search hits with surrounding context
   commands PATTERN [options]            retrieve exact historical tool calls
   info [--sources]                     show index and installation details
-  doctor                                check index and installation health
+  doctor [--secrets]                    check index, installation, and optional secrets scan
+  redact [--hours H] [--apply]          scan or redact recent transcript secrets
   refresh                              synchronously index changed transcripts
   rebuild [--session ID]                discard and rebuild the index
   serve [--host 127.0.0.1] [--port N]  serve the local OpenAPI HTTP API
@@ -107,6 +109,16 @@ context options:
   Supports search time windows, --cwd, --per-session and --reduce-noise.
   --before N            messages before each hit (default 3)
   --after N             messages after each hit (default 8)
+
+doctor secrets options:
+  --secrets             scan recent transcripts for likely secrets
+  --hours H             inspect the last H hours (default 48)
+  --secret-file FILE    read exact values from a dotenv file (repeatable)
+
+redact options:
+  --hours H             inspect the last H hours (default 48)
+  --apply               rewrite matching transcripts and rebuild affected sessions
+  --secret-file FILE    read exact values from a dotenv file (repeatable)
 
 commands options:
   --match MODE          arguments, output, or both (default); one invocation
@@ -203,6 +215,8 @@ func Run(args []string, cfg Config, stdout, stderr io.Writer) int {
 		err = runInfo(rest, cfg, stdout, stderr)
 	case "doctor":
 		err = runDoctor(rest, cfg, stdout, stderr)
+	case "redact":
+		err = runRedact(rest, cfg, stdout, stderr)
 	case "refresh":
 		err = runRefresh(rest, cfg, stdout, stderr)
 	case "rebuild":
@@ -797,11 +811,27 @@ func runInfo(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 
 func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
 	f := newFlagSet("doctor", stderr)
+	secrets := f.set.Bool("secrets", false, "scan recent transcripts for likely secrets")
+	hours := f.set.Int("hours", 48, "inspect the last H hours when --secrets is set")
+	var secretFiles []string
+	f.set.Func("secret-file", "read exact values from a dotenv file (repeatable)", func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return errors.New("secret-file cannot be empty")
+		}
+		secretFiles = append(secretFiles, value)
+		return nil
+	})
 	if err := f.parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if f.set.NArg() > 0 {
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, f.set.Arg(0))
+	}
+	if *hours <= 0 {
+		return fmt.Errorf("%w: --hours must be positive", errUsage)
+	}
+	if len(secretFiles) > 0 && !*secrets {
+		return fmt.Errorf("%w: --secret-file requires --secrets", errUsage)
 	}
 	cfg = f.resolve(cfg)
 	info, err := diagnosticInfo(cfg, stderr, true, false)
@@ -812,6 +842,30 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		{Name: "index", OK: info.IndexHealthy, Detail: info.IndexPath},
 		{Name: "schema", OK: info.SchemaVersion == index.SchemaVersion, Detail: fmt.Sprintf("version %d", info.SchemaVersion)},
 		{Name: "lock", OK: info.LockHealthy, Detail: "snapshot opened without acquiring writer lock"},
+	}
+	if *secrets {
+		values, err := loadSecretValues(secretFiles)
+		if err != nil {
+			return err
+		}
+		since := time.Now().UTC().Add(-time.Duration(*hours) * time.Hour)
+		report, err := redact.Scan(cfg.TranscriptDirs, redact.Options{
+			Since:        since,
+			SecretValues: values,
+		})
+		if err != nil {
+			return err
+		}
+		indexMatches, err := countIndexMatches(cfg, since, values, stderr)
+		if err != nil {
+			return err
+		}
+		checks = append(checks, output.DoctorCheck{
+			Name: reportCheckName,
+			OK:   report.Matches == 0 && indexMatches == 0,
+			Detail: fmt.Sprintf("%d source matches in %d files; %d SQLite matches over the last %d hours",
+				report.Matches, len(report.Findings), indexMatches, *hours),
+		})
 	}
 	ok := true
 	for _, check := range checks {
@@ -824,6 +878,136 @@ func runDoctor(args []string, cfg Config, stdout, stderr io.Writer) (err error) 
 		return errors.New("doctor found an unhealthy index")
 	}
 	return nil
+}
+
+const reportCheckName = "secrets"
+
+func loadSecretValues(paths []string) ([]string, error) {
+	values := redact.SecretValuesFromEnvironment()
+	if len(paths) == 0 {
+		return values, nil
+	}
+	fromFiles, err := redact.SecretValuesFromFiles(paths)
+	if err != nil {
+		return nil, err
+	}
+	return append(values, fromFiles...), nil
+}
+
+func countIndexMatches(cfg Config, since time.Time, values []string, stderr io.Writer) (int, error) {
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	return db.CountContentMatches(since, values)
+}
+
+func runRedact(args []string, cfg Config, stdout, stderr io.Writer) (err error) {
+	set := flag.NewFlagSet("redact", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	hours := set.Int("hours", 48, "inspect the last H hours")
+	apply := set.Bool("apply", false, "rewrite matching transcripts and rebuild affected sessions")
+	indexPath := set.String("index", "", "index database to use")
+	transcriptDir := set.String("transcripts", "", "transcript directory to scan")
+	var secretFiles []string
+	set.Func("secret-file", "read exact values from a dotenv file (repeatable)", func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return errors.New("secret-file cannot be empty")
+		}
+		secretFiles = append(secretFiles, value)
+		return nil
+	})
+	if err := set.Parse(args); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if set.NArg() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, set.Arg(0))
+	}
+	if *hours <= 0 {
+		return fmt.Errorf("%w: --hours must be positive", errUsage)
+	}
+	if *indexPath != "" {
+		cfg.IndexPath = *indexPath
+	}
+	if *transcriptDir != "" {
+		cfg.TranscriptDirs = []string{*transcriptDir}
+	}
+	cfg = cfg.withDefaults()
+	values, err := loadSecretValues(secretFiles)
+	if err != nil {
+		return err
+	}
+	since := time.Now().UTC().Add(-time.Duration(*hours) * time.Hour)
+	opts := redact.Options{Since: since, SecretValues: values}
+	if !*apply {
+		report, err := redact.Scan(cfg.TranscriptDirs, opts)
+		if err != nil {
+			return err
+		}
+		response := redactOutput(report, since, *hours, false)
+		response.IndexMatches, err = countIndexMatches(cfg, since, values, stderr)
+		if err != nil {
+			return err
+		}
+		return writeJSONLine(stdout, response)
+	}
+
+	// Sync first so the database reflects the pre-redaction source, then hold
+	// the lifecycle lock across source replacement and per-session rebuilds.
+	db, err := openIndex(cfg, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeIndex(db)) }()
+	response := output.RedactResponse{
+		Since: since.Format(time.RFC3339Nano), Hours: *hours, Applied: true,
+	}
+	if err := db.WithLifecycleLock(func() error {
+		report, err := redact.Scan(cfg.TranscriptDirs, opts)
+		if err != nil {
+			return err
+		}
+		response.FilesScanned = report.FilesScanned
+		response.RecordsScanned = report.RecordsScanned
+		response.FilesWithMatches = len(report.Findings)
+		response.Matches = report.Matches
+		for _, finding := range report.Findings {
+			result, err := redact.RedactFile(finding.Path, finding.Root, opts, true)
+			if err != nil {
+				return err
+			}
+			if result.Matches == 0 {
+				continue
+			}
+			response.FilesRedacted++
+			stats, err := db.Rebuild(finding.Root, finding.Session)
+			if err != nil {
+				return err
+			}
+			response.SessionsRebuilt += stats.SessionsIndexed
+			response.MessagesReindexed += stats.MessagesIndexed
+		}
+		remaining, err := redact.Scan(cfg.TranscriptDirs, opts)
+		if err != nil {
+			return err
+		}
+		response.RemainingMatches = remaining.Matches
+		response.IndexMatches, err = db.CountContentMatches(since, values)
+		return err
+	}); err != nil {
+		return err
+	}
+	return writeJSONLine(stdout, response)
+}
+
+func redactOutput(report redact.Report, since time.Time, hours int, applied bool) output.RedactResponse {
+	return output.RedactResponse{
+		Since: since.Format(time.RFC3339Nano), Hours: hours, Applied: applied,
+		FilesScanned: report.FilesScanned, RecordsScanned: report.RecordsScanned,
+		FilesWithMatches: len(report.Findings), Matches: report.Matches,
+		RemainingMatches: report.Matches,
+	}
 }
 
 func diagnosticInfo(cfg Config, stderr io.Writer, verify, includeSources bool) (info output.InfoResponse, err error) {

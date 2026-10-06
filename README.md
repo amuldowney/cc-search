@@ -76,6 +76,9 @@ cc-search refresh
 # Diagnose the installation or rebuild derived data.
 cc-search info
 cc-search doctor
+cc-search doctor --secrets --hours 48
+cc-search redact --hours 48             # dry-run; prints counts only
+cc-search redact --hours 48 --apply     # rewrite transcripts and rebuild SQLite
 cc-search rebuild
 ```
 
@@ -83,6 +86,31 @@ Search patterns are positional and must come before flags. A unique prefix of a
 message or activity ID is accepted by `read` and `activity`, but prefer full
 IDs. Pi message IDs start with the session UUID, so an eight-character prefix
 is normally ambiguous.
+
+## Transcript secret redaction
+
+`doctor` remains read-only with respect to transcript files. Use
+`doctor --secrets` to scan a time window for likely credentials in both source
+transcripts and the derived SQLite content; it reports counts and never prints
+matched values. Use `redact` for the explicit cleanup flow:
+
+```bash
+# Audit only.
+cc-search redact --hours 48
+
+# Rewrite matching JSONL/JSONL.zst transcripts and rebuild each affected
+# session, removing the old content from SQLite/FTS.
+cc-search redact --hours 48 --apply
+
+# Optionally add exact values from a dotenv file without printing the file.
+cc-search redact --hours 48 --secret-file /path/to/secrets.env --apply
+```
+
+Only records in the selected window are changed. Encrypted reasoning signatures
+and binary attachment payloads are left untouched. The apply flow holds the
+index lifecycle lock across source replacement and per-session rebuilds, then
+reports any remaining matches. This does not revoke credentials; rotate exposed
+credentials separately.
 
 ## What is indexed
 

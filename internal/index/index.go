@@ -21,6 +21,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/mattn/go-sqlite3"
 
+	"github.com/amuldowney/cc-search/internal/redact"
 	"github.com/amuldowney/cc-search/internal/transcript"
 )
 
@@ -382,6 +383,29 @@ func (d *DB) Sync(dir string) (SyncStats, error) {
 // non-empty only that session is rebuilt.
 func (d *DB) Rebuild(dir, sessionID string) (SyncStats, error) {
 	return d.sync(dir, sessionID, true)
+}
+
+// CountContentMatches checks indexed message content without returning any
+// content. It is used by transcript redaction to verify that the recent slice
+// of SQLite/FTS no longer contains detected credentials.
+func (d *DB) CountContentMatches(since time.Time, secretValues []string) (int, error) {
+	rows, err := d.sql.Query(`SELECT content FROM messages WHERE timestamp >= ?`, since.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	matches := 0
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return 0, err
+		}
+		matches += redact.CountMatches(content, secretValues)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return matches, nil
 }
 
 func (d *DB) sync(dir, sessionID string, force bool) (SyncStats, error) {

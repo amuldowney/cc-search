@@ -151,6 +151,23 @@ type DoctorResponse struct {
 	Checks []DoctorCheck `json:"checks"`
 }
 
+// RedactResponse reports a secrets scan or transcript redaction. It contains
+// counts only; matched values are never returned.
+type RedactResponse struct {
+	Since             string `json:"since"`
+	Hours             int    `json:"hours"`
+	Applied           bool   `json:"applied"`
+	FilesScanned      int    `json:"filesScanned"`
+	RecordsScanned    int    `json:"recordsScanned"`
+	FilesWithMatches  int    `json:"filesWithMatches"`
+	Matches           int    `json:"matches"`
+	FilesRedacted     int    `json:"filesRedacted"`
+	SessionsRebuilt   int    `json:"sessionsRebuilt"`
+	MessagesReindexed int    `json:"messagesReindexed"`
+	IndexMatches      int    `json:"indexMatches"`
+	RemainingMatches  int    `json:"remainingMatches"`
+}
+
 // Budget tells the caller what the character budget cost it, so it can decide
 // whether to widen the query or spend more.
 type Budget struct {
